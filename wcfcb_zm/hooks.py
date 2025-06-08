@@ -9,6 +9,10 @@ app_license = "mit"
 # Includes in <head>
 # ------------------
 
+app_include_css = ["assets/wcfcb_zm/css/custom_theme.css"]
+
+def update_website_theme(context):
+    context.website_theme = 'wcfcb_zm.themes.custom_theme.CustomTheme'
 # include js, css files in header of desk.html
 # app_include_css = "/assets/wcfcb_zm/css/wcfcb_zm.css"
 # app_include_js = "/assets/wcfcb_zm/js/wcfcb_zm.js"
