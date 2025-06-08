@@ -1,18 +1,243 @@
+/* WCFCB ZM Custom Theme */
+/* Primary: #347fb6 (Blue), Secondary: #ed8643 (Orange) */
+
+/* Global CSS Variables */
 :root {
-    --primary-color: #347fb6;
-    --secondary-color: #ed8643;
+    --wcfcb-primary: #347fb6;
+    --wcfcb-secondary: #ed8643;
+    --wcfcb-primary-dark: #2a6594;
+    --wcfcb-primary-light: #5d9bc9;
+    --wcfcb-secondary-dark: #d4722a;
+    --wcfcb-secondary-light: #f2a366;
 }
 
-.navbar {
-    background-color: var(--primary-color) !important;
+/* Desk Theme - Target the custom theme data attribute */
+[data-theme="wcfcb_theme"] {
+    /* Primary color overrides */
+    --primary: var(--wcfcb-primary);
+    --primary-color: var(--wcfcb-primary);
+    --blue: var(--wcfcb-primary);
+    --blue-100: var(--wcfcb-primary-light);
+    --blue-500: var(--wcfcb-primary);
+    --blue-600: var(--wcfcb-primary-dark);
+
+    /* Secondary color */
+    --orange: var(--wcfcb-secondary);
+    --orange-500: var(--wcfcb-secondary);
+
+    /* Navbar and header */
+    --navbar-bg: var(--wcfcb-primary);
+    --navbar-color: #ffffff;
+
+    /* Buttons */
+    --btn-primary-bg: var(--wcfcb-primary);
+    --btn-primary-border: var(--wcfcb-primary);
+
+    /* Links and accents */
+    --link-color: var(--wcfcb-primary);
+    --text-color: #333333;
+
+    /* Avatar colors */
+    --blue-avatar-bg: var(--wcfcb-primary);
+    --blue-avatar-color: #ffffff;
 }
 
+/* Navbar Styling */
+.navbar, .navbar-default {
+    background-color: var(--wcfcb-primary) !important;
+    border-color: var(--wcfcb-primary-dark) !important;
+}
+
+.navbar .navbar-brand,
+.navbar .navbar-nav > li > a,
+.navbar .navbar-text {
+    color: #ffffff !important;
+}
+
+.navbar .navbar-nav > li > a:hover,
+.navbar .navbar-nav > li > a:focus {
+    color: var(--wcfcb-secondary-light) !important;
+    background-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+/* Primary Buttons */
 .btn-primary {
-    background-color: var(--primary-color) !important;
-    border-color: var(--primary-color) !important;
+    background-color: var(--wcfcb-primary) !important;
+    border-color: var(--wcfcb-primary) !important;
+    color: #ffffff !important;
 }
 
+.btn-primary:hover,
+.btn-primary:focus,
+.btn-primary:active {
+    background-color: var(--wcfcb-primary-dark) !important;
+    border-color: var(--wcfcb-primary-dark) !important;
+}
+
+/* Secondary Buttons */
 .btn-secondary {
-    background-color: var(--secondary-color) !important;
-    border-color: var(--secondary-color) !important;
+    background-color: var(--wcfcb-secondary) !important;
+    border-color: var(--wcfcb-secondary) !important;
+    color: #ffffff !important;
+}
+
+.btn-secondary:hover,
+.btn-secondary:focus,
+.btn-secondary:active {
+    background-color: var(--wcfcb-secondary-dark) !important;
+    border-color: var(--wcfcb-secondary-dark) !important;
+}
+
+/* Links */
+a {
+    color: var(--wcfcb-primary) !important;
+}
+
+a:hover, a:focus {
+    color: var(--wcfcb-primary-dark) !important;
+}
+
+/* Sidebar */
+.desk-sidebar .sidebar-item.selected {
+    background-color: var(--wcfcb-primary) !important;
+    color: #ffffff !important;
+}
+
+.desk-sidebar .sidebar-item:hover {
+    background-color: rgba(52, 127, 182, 0.1) !important;
+}
+
+/* Form Controls */
+.form-control:focus {
+    border-color: var(--wcfcb-primary) !important;
+    box-shadow: 0 0 0 0.2rem rgba(52, 127, 182, 0.25) !important;
+}
+
+/* Indicators and badges */
+.indicator.blue, .indicator-pill.blue {
+    background-color: var(--wcfcb-primary) !important;
+}
+
+.indicator.orange, .indicator-pill.orange {
+    background-color: var(--wcfcb-secondary) !important;
+}
+
+/* Progress bars */
+.progress-bar {
+    background-color: var(--wcfcb-primary) !important;
+}
+
+/* Tabs */
+.nav-tabs .nav-link.active {
+    color: var(--wcfcb-primary) !important;
+    border-bottom-color: var(--wcfcb-primary) !important;
+}
+
+.nav-tabs .nav-link:hover {
+    color: var(--wcfcb-primary-dark) !important;
+}
+
+/* Dropdown menus */
+.dropdown-item:hover,
+.dropdown-item:focus {
+    background-color: rgba(52, 127, 182, 0.1) !important;
+    color: var(--wcfcb-primary) !important;
+}
+
+/* LOGIN PAGE STYLING */
+/* Target login page specifically */
+.login-content {
+    background: linear-gradient(135deg, var(--wcfcb-primary) 0%, var(--wcfcb-primary-dark) 100%) !important;
+}
+
+.login-content .login-box {
+    background: #ffffff !important;
+    border-radius: 8px !important;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2) !important;
+}
+
+.login-content .login-box .form-signin-heading {
+    color: var(--wcfcb-primary) !important;
+    font-weight: 600 !important;
+}
+
+.login-content .btn-login {
+    background-color: var(--wcfcb-primary) !important;
+    border-color: var(--wcfcb-primary) !important;
+    color: #ffffff !important;
+    font-weight: 500 !important;
+}
+
+.login-content .btn-login:hover,
+.login-content .btn-login:focus {
+    background-color: var(--wcfcb-primary-dark) !important;
+    border-color: var(--wcfcb-primary-dark) !important;
+}
+
+.login-content .form-control:focus {
+    border-color: var(--wcfcb-primary) !important;
+    box-shadow: 0 0 0 0.2rem rgba(52, 127, 182, 0.25) !important;
+}
+
+.login-content .page-card-head {
+    background-color: var(--wcfcb-primary) !important;
+    color: #ffffff !important;
+}
+
+/* Login page links */
+.login-content a {
+    color: var(--wcfcb-primary) !important;
+}
+
+.login-content a:hover {
+    color: var(--wcfcb-primary-dark) !important;
+}
+
+/* Brand logo area on login */
+.login-content .brand-logo {
+    filter: brightness(0) invert(1) !important; /* Make logo white if it's dark */
+}
+
+/* Alternative login page selectors for different Frappe versions */
+.page-login .login-box,
+.page-login .card {
+    border-top: 4px solid var(--wcfcb-primary) !important;
+}
+
+.page-login .btn-primary {
+    background-color: var(--wcfcb-primary) !important;
+    border-color: var(--wcfcb-primary) !important;
+}
+
+.page-login .btn-primary:hover {
+    background-color: var(--wcfcb-primary-dark) !important;
+    border-color: var(--wcfcb-primary-dark) !important;
+}
+
+/* Website header (if using website theme) */
+.website-header {
+    background-color: var(--wcfcb-primary) !important;
+}
+
+.website-header .navbar-brand,
+.website-header .nav-link {
+    color: #ffffff !important;
+}
+
+.website-header .nav-link:hover {
+    color: var(--wcfcb-secondary-light) !important;
+}
+
+/* Footer styling */
+.web-footer {
+    background-color: var(--wcfcb-primary-dark) !important;
+    color: #ffffff !important;
+}
+
+.web-footer a {
+    color: var(--wcfcb-secondary-light) !important;
+}
+
+.web-footer a:hover {
+    color: #ffffff !important;
 }

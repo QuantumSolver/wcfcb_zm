@@ -1,6 +1,14 @@
+# WCFCB ZM Custom Website Theme
+# This file provides website theme variables for web pages
+# The main desk theme is handled through CSS and JavaScript files
+
 from frappe.website_theme.website_theme import WebsiteTheme
 
 class CustomTheme(WebsiteTheme):
+    """
+    Custom website theme for WCFCB ZM
+    This affects website pages, not the Frappe Desk interface
+    """
     def get_theme_variables(self):
         theme_vars = super().get_theme_variables()
         custom_vars = {

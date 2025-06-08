@@ -9,13 +9,13 @@ app_license = "mit"
 # Includes in <head>
 # ------------------
 
-app_include_css = ["assets/wcfcb_zm/css/custom_theme.css"]
+# Include CSS and JS files in desk.html (Frappe Desk interface)
+app_include_css = ["/assets/wcfcb_zm/css/custom_theme.css"]
+app_include_js = ["/assets/wcfcb_zm/js/wcfcb_theme.js"]
 
-def update_website_theme(context):
-    context.website_theme = 'wcfcb_zm.themes.custom_theme.CustomTheme'
-# include js, css files in header of desk.html
-# app_include_css = "/assets/wcfcb_zm/css/wcfcb_zm.css"
-# app_include_js = "/assets/wcfcb_zm/js/wcfcb_zm.js"
+# Include CSS and JS files in web templates (Website pages)
+web_include_css = ["/assets/wcfcb_zm/css/custom_theme.css"]
+web_include_js = ["/assets/wcfcb_zm/js/wcfcb_theme.js"]
 
 # include js, css files in header of web template
 # web_include_css = "/assets/wcfcb_zm/css/wcfcb_zm.css"
@@ -176,9 +176,10 @@ after_migrate = [
 # Overriding Methods
 # ------------------------------
 #
-# override_whitelisted_methods = {
-# 	"frappe.desk.doctype.event.event.get_events": "wcfcb_zm.event.get_events"
-# }
+# Override theme switching to support custom theme
+override_whitelisted_methods = {
+	"frappe.core.doctype.user.user.switch_theme": "wcfcb_zm.overrides.switch_theme.switch_theme"
+}
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,
