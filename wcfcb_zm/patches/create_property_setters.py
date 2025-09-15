@@ -28,29 +28,41 @@ def create_property_setter_from_json(property_setters_obj):
         "__last_sync_on",
     ]
 
-    existing_setters = {d.name for d in frappe.db.get_all("Property Setter", fields=["name"],page_length=10000)}
+    existing_setters = {d.name for d in frappe.db.get_all("Property Setter", fields=["name"], page_length=10000)}
 
     for property_setter in property_setters_obj:
-        if property_setter.get('name') in existing_setters:
+        # Skip invalid entries
+        if not isinstance(property_setter, dict) or not property_setter:
             continue
 
-        if property_setter.get('doctype_or_field') == "DocType":
-            for_doctype = True
-        else:
-            for_doctype = False
+        if property_setter.get("name") in existing_setters:
+            continue
+
+        for_doctype = property_setter.get("doctype_or_field") == "DocType"
 
         all_fields = frappe.get_meta("Property Setter").get_valid_columns()
         field_list = set(all_fields).difference(disallowed_fields)
-        
+
         property_setter_dict = {field: property_setter.get(field) for field in field_list if field in property_setter}
-        
+
+        # Accept alternative keys for doc_type
+        doc_type = property_setter_dict.get("doc_type") or property_setter.get("doctype") or property_setter.get("dt")
+        prop = property_setter_dict.get("property") or property_setter.get("property")
+        value = property_setter_dict.get("value") or property_setter.get("value")
+        prop_type = property_setter_dict.get("property_type") or property_setter.get("property_type")
+        fieldname = property_setter_dict.get("field_name") or property_setter.get("field_name")
+
+        # Require minimum fields
+        if not doc_type or not prop or prop_type is None or value is None:
+            continue
+
         make_property_setter(
-            doctype=property_setter_dict['doc_type'],
-            fieldname=property_setter_dict.get('field_name', None),
-            property=property_setter_dict['property'],
-            value=property_setter_dict['value'],
-            property_type=property_setter_dict['property_type'],
-            for_doctype=for_doctype
+            doctype=doc_type,
+            fieldname=fieldname,
+            property=prop,
+            value=value,
+            property_type=prop_type,
+            for_doctype=for_doctype,
         )
 
 def execute():

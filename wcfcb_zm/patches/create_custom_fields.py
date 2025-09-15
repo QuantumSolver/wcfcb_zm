@@ -31,20 +31,33 @@ def create_fields_from_json(custom_fields_obj):
     doctype_custom_fields_dict = {}
 
     for custom_field in custom_fields_obj:
-        doctype = custom_field["dt"]
+        # Skip non-dicts or empty entries like {} that may exist in JSON
+        if not isinstance(custom_field, dict) or not custom_field:
+            continue
+
+        # Support both 'dt' and 'doctype' keys; skip if missing
+        doctype = custom_field.get("dt") or custom_field.get("doctype")
+        if not doctype:
+            # No doctype info; ignore this entry safely
+            continue
+
         all_fields = frappe.get_meta("Custom Field").get_valid_columns()
         field_list = set(all_fields).difference(disallowed_fields)
         custom_field_dict = {}
         for field_name in field_list:
-            custom_field_dict[field_name] = custom_field.get(field_name)
+            if field_name in custom_field:
+                custom_field_dict[field_name] = custom_field.get(field_name)
 
         # Ensure the list for the doctype is initialized
         if doctype not in doctype_custom_fields_dict:
             doctype_custom_fields_dict[doctype] = []
 
-        doctype_custom_fields_dict[doctype].append(custom_field_dict)
+        # Only append if we have at least a fieldname and label to create a valid Custom Field
+        if custom_field_dict:
+            doctype_custom_fields_dict[doctype].append(custom_field_dict)
 
-    create_custom_fields(doctype_custom_fields_dict, update=False)
+    if doctype_custom_fields_dict:
+        create_custom_fields(doctype_custom_fields_dict, update=False)
 
 
 def execute():
