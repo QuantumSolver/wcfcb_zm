@@ -5,6 +5,14 @@ frappe.ui.form.on('Budget Request', {
     refresh: function(frm) {
         setup_field_dependencies(frm);
 
+        // Force new requests to use multi-transfer mode
+        if (frm.is_new()) {
+            force_multi_transfer_mode(frm);
+        }
+
+        // Set up account filters for transfer items
+        setup_transfer_item_filters(frm);
+
         // Add View Summary button for approved requests
         add_view_summary_button(frm);
     },
@@ -22,10 +30,14 @@ frappe.ui.form.on('Budget Request', {
 
     budget: function(frm) {
         handle_budget_change(frm);
+        // Refresh account filters when budget changes
+        setup_transfer_item_filters(frm);
     },
 
     target_budget: function(frm) {
         handle_target_budget_change(frm);
+        // Refresh account filters when target budget changes
+        setup_transfer_item_filters(frm);
     },
 
     expense_account: function(frm) {
@@ -257,6 +269,12 @@ frappe.ui.form.on('Budget Request Item', {
     from_account: function(frm, cdt, cdn) {
         let row = locals[cdt][cdn];
         if (row.from_account) {
+            // Validate account selection for intra-budget transfers
+            if (frm.doc.virement_type === 'Intra-Budget' && row.to_account && row.from_account === row.to_account) {
+                frappe.msgprint(__('For Intra-Budget transfers, From Account and To Account must be different'));
+                frappe.model.set_value(cdt, cdn, 'from_account', '');
+                return;
+            }
             // Fetch available balance for from_account
             fetch_account_balance(frm, row.from_account, 'from_available', cdt, cdn);
         } else {
@@ -269,8 +287,18 @@ frappe.ui.form.on('Budget Request Item', {
     to_account: function(frm, cdt, cdn) {
         let row = locals[cdt][cdn];
         if (row.to_account) {
-            // Fetch available balance for to_account
-            fetch_account_balance(frm, row.to_account, 'to_available', cdt, cdn);
+            // Validate account selection for intra-budget transfers
+            if (frm.doc.virement_type === 'Intra-Budget' && row.from_account && row.from_account === row.to_account) {
+                frappe.msgprint(__('For Intra-Budget transfers, From Account and To Account must be different'));
+                frappe.model.set_value(cdt, cdn, 'to_account', '');
+                return;
+            }
+
+            // Fetch balance from appropriate budget
+            let target_budget = frm.doc.virement_type === 'Inter-Budget' ? frm.doc.target_budget : frm.doc.budget;
+            if (target_budget) {
+                fetch_account_balance_from_budget(frm, row.to_account, 'to_available', cdt, cdn, target_budget);
+            }
         } else {
             // Clear related fields
             frappe.model.set_value(cdt, cdn, 'to_available', 0);
@@ -288,11 +316,9 @@ frappe.ui.form.on('Budget Request Item', {
     },
 
     transfer_items_add: function(frm) {
-        // Set default values for new row if needed
-        let new_row = frm.doc.transfer_items[frm.doc.transfer_items.length - 1];
-        if (new_row) {
-            // Could set default values here if needed
-        }
+        // Set up filters for new row
+        setup_transfer_item_filters(frm);
+        calculate_total_transfer_amount(frm);
     }
 });
 
@@ -304,6 +330,27 @@ function fetch_account_balance(frm, account, target_field, cdt, cdn) {
         method: 'wcfcb_zm.api.budget_request.get_account_balance_from_budget',
         args: {
             budget_name: frm.doc.budget,
+            account: account
+        },
+        callback: function(r) {
+            if (r.message && r.message.success) {
+                frappe.model.set_value(cdt, cdn, target_field, r.message.available_balance);
+                // Recalculate balances after setting available balance
+                calculate_transfer_item_balances(frm, cdt, cdn);
+            } else {
+                frappe.model.set_value(cdt, cdn, target_field, 0);
+            }
+        }
+    });
+}
+
+function fetch_account_balance_from_budget(frm, account, target_field, cdt, cdn, budget_name) {
+    if (!account || !budget_name) return;
+
+    frappe.call({
+        method: 'wcfcb_zm.api.budget_request.get_account_balance_from_budget',
+        args: {
+            budget_name: budget_name,
             account: account
         },
         callback: function(r) {
@@ -352,6 +399,36 @@ function calculate_total_transfer_amount(frm) {
 
     // Update display or validation as needed
     frm.refresh_field('transfer_items');
+}
+
+function setup_transfer_item_filters(frm) {
+    if (!frm.doc.budget) return;
+
+    // Set up filters for from_account field
+    frm.set_query('from_account', 'transfer_items', function() {
+        return {
+            query: 'wcfcb_zm.api.budget_request.get_budget_accounts',
+            filters: {
+                'budget': frm.doc.budget
+            }
+        };
+    });
+
+    // Set up filters for to_account field
+    frm.set_query('to_account', 'transfer_items', function(_, cdt, cdn) {
+        let row = locals[cdt][cdn];
+        let target_budget = frm.doc.virement_type === 'Inter-Budget' ? frm.doc.target_budget : frm.doc.budget;
+
+        if (!target_budget) return {};
+
+        return {
+            query: 'wcfcb_zm.api.budget_request.get_budget_accounts',
+            filters: {
+                'budget': target_budget,
+                'exclude_account': frm.doc.virement_type === 'Intra-Budget' ? row.from_account : null
+            }
+        };
+    });
 }
 
 function is_multi_transfer_mode(frm) {
@@ -702,6 +779,12 @@ function validate_virement_request(frm) {
         }
     }
 
+    // Force new requests to use multi-transfer mode only
+    if (frm.is_new() && !is_multi_transfer_mode(frm)) {
+        frappe.msgprint(__('New Budget Requests must use the Transfer Items table. Please add your transfers using the table below.'));
+        return false;
+    }
+
     // Check if using multi-transfer mode
     if (is_multi_transfer_mode(frm)) {
         // Multi-transfer validation
@@ -719,8 +802,10 @@ function validate_virement_request(frm) {
                 return false;
             }
 
-            if (item.from_account === item.to_account) {
-                frappe.msgprint(__(`Transfer item ${i + 1}: FROM and TO accounts must be different`));
+            // For intra-budget transfers, from and to accounts must be different
+            // For inter-budget transfers, accounts can be the same (transferring between budgets)
+            if (frm.doc.virement_type === 'Intra-Budget' && item.from_account === item.to_account) {
+                frappe.msgprint(__(`Transfer item ${i + 1}: For Intra-Budget transfers, FROM and TO accounts must be different`));
                 return false;
             }
 
@@ -1604,6 +1689,25 @@ function show_approval_summary_dialog(frm, response_data) {
         indicator: 'green',
         wide: true
     });
+}
+
+function force_multi_transfer_mode(frm) {
+    // Hide single-transfer fields for new requests
+    frm.set_df_property('expense_account', 'hidden', 1);
+    frm.set_df_property('to_expense_account', 'hidden', 1);
+    frm.set_df_property('amount_requested', 'hidden', 1);
+
+    // Show multi-transfer section
+    frm.set_df_property('multi_transfer_section', 'hidden', 0);
+    frm.set_df_property('transfer_items', 'hidden', 0);
+
+    // Add a helpful message
+    if (!frm.doc.transfer_items || frm.doc.transfer_items.length === 0) {
+        frappe.show_alert({
+            message: __('Please use the Transfer Items table below to add account transfers'),
+            indicator: 'blue'
+        });
+    }
 }
 
 

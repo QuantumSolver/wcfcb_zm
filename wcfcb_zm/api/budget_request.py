@@ -157,6 +157,7 @@ def get_account_balance_from_budget(budget_name, account):
             'message': 'Error fetching account balance: ' + str(e)
         }
 
+@frappe.whitelist()
 def get_budget_accounts(budget, exclude_account=None):
     """Get accounts within a budget, optionally excluding one account"""
     try:
