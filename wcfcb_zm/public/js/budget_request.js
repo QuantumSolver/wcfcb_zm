@@ -1,0 +1,1365 @@
+// Client Script for Budget Request
+// Purpose: Virement Logic - Handles Intra-Budget and Inter-Budget transfer validation and field behavior
+
+frappe.ui.form.on('Budget Request', {
+    refresh: function(frm) {
+        setup_field_dependencies(frm);
+
+        // Add View Summary button for approved requests
+        add_view_summary_button(frm);
+    },
+
+    onload_post_render: function(frm) {
+        // Handle amended documents - copy field values from original
+        if (frm.doc.amended_from && frm.is_new()) {
+            copy_fields_from_amended_doc(frm);
+        }
+    },
+
+    virement_type: function(frm) {
+        handle_virement_type_change(frm);
+    },
+
+    budget: function(frm) {
+        handle_budget_change(frm);
+    },
+
+    target_budget: function(frm) {
+        handle_target_budget_change(frm);
+    },
+
+    expense_account: function(frm) {
+        handle_expense_account_change(frm);
+    },
+
+    to_expense_account: function(frm) {
+        handle_to_expense_account_change(frm);
+    },
+
+    before_save: function(frm) {
+        return handle_external_approval_before_save(frm);
+    },
+
+    amount_requested: function(frm) {
+        handle_amount_change(frm);
+    },
+
+    workflow_state: function(frm) {
+        // Clear external approval messages when workflow state changes to final states
+        const final_states = ['Approved', 'Rejected'];
+        if (final_states.includes(frm.doc.workflow_state) || frm.doc.docstatus === 2) {
+            clear_external_approval_message(frm);
+        } else {
+            // Re-check amount for new workflow state
+            if (frm.doc.amount_requested) {
+                handle_amount_change(frm);
+            }
+        }
+    },
+
+    validate: function(frm) {
+        // Only validate virement request, no workflow interception here
+        return validate_virement_request(frm);
+    },
+
+    before_workflow_action: async function(frm) {
+        // Skip interception if we're already in custom approval flow
+        if (frm._custom_approval_in_progress) {
+            return;
+        }
+
+        // Intercept "Approve" workflow action with Promise-based blocking approach
+        if (frm.selected_workflow_action === 'Approve') {
+            let promise = new Promise((resolve, reject) => {
+                // Validate required fields first
+                if (!frm.doc.budget || !frm.doc.expense_account || !frm.doc.to_expense_account || !frm.doc.amount_requested) {
+                    frappe.msgprint({
+                        title: __('Missing Information'),
+                        message: __('Please ensure all required fields are filled before approving.'),
+                        indicator: 'red'
+                    });
+                    reject();
+                    return;
+                }
+
+                // Remove any existing freeze overlay that might block the dialog
+                if (document.getElementById('freeze')) {
+                    document.getElementById('freeze').remove();
+                }
+
+                // Show custom confirmation dialog to avoid overlay issues
+                let dialog = new frappe.ui.Dialog({
+                    title: __('Confirm Budget Virement Approval'),
+                    fields: [
+                        {
+                            fieldtype: 'HTML',
+                            fieldname: 'confirmation_html',
+                            options: `
+                                <div style="padding: 15px;">
+                                    <h4 style="color: #dc3545; margin-bottom: 15px;">
+                                        <i class="fa fa-exclamation-triangle"></i>
+                                        Are you sure you want to approve this budget virement?
+                                    </h4>
+
+                                    <div style="background: #f8f9fa; padding: 12px; border-radius: 4px; margin-bottom: 15px;">
+                                        <h5 style="margin-bottom: 10px;">Transfer Details:</h5>
+                                        <ul style="margin: 0; padding-left: 20px;">
+                                            <li><strong>Type:</strong> ${frm.doc.virement_type}</li>
+                                            <li><strong>Amount:</strong> K ${Math.abs(frm.doc.amount_requested || 0).toLocaleString()}</li>
+                                            <li><strong>From:</strong> ${frm.doc.expense_account}</li>
+                                            <li><strong>To:</strong> ${frm.doc.to_expense_account}</li>
+                                            <li><strong>Budget:</strong> ${frm.doc.budget}</li>
+                                            ${frm.doc.target_budget ? '<li><strong>Target Budget:</strong> ' + frm.doc.target_budget + '</li>' : ''}
+                                        </ul>
+                                    </div>
+
+                                    <div style="background: #fff3cd; padding: 10px; border-radius: 4px; border-left: 4px solid #ffc107;">
+                                        <small><em>This will cancel the current budget and create an amended version.</em></small>
+                                    </div>
+                                </div>
+                            `
+                        }
+                    ],
+                    primary_action_label: __('Yes, Approve'),
+                    primary_action: function() {
+                        dialog.hide();
+
+                        // STEP 1: Refresh document and check if Budget Request is already approved
+                        frm.reload_doc().then(() => {
+                            if (frm.doc.workflow_state === 'Approved' && frm.doc.docstatus === 1) {
+                                // Already approved, skip workflow and go directly to amendment
+                                process_budget_amendment();
+                            } else {
+                            // STEP 1: First approve the Budget Request through workflow
+                            frm._custom_approval_in_progress = true; // Set flag to prevent hook interference
+                            frappe.call({
+                                method: 'frappe.model.workflow.apply_workflow',
+                                args: {
+                                    doc: frm.doc,
+                                    action: 'Approve'
+                                },
+                                callback: function(workflow_response) {
+                                    frm._custom_approval_in_progress = false; // Clear flag
+                                    if (workflow_response.message) {
+                                        process_budget_amendment();
+                                    } else {
+                                        // Check if it's just "Not a valid Workflow Action" - suppress this error
+                                        if (workflow_response.exc && workflow_response.exc.includes('Not a valid Workflow Action')) {
+                                            // Document is already approved, proceed with amendment
+                                            process_budget_amendment();
+                                        } else {
+                                            frappe.msgprint({
+                                                title: __('Workflow Error'),
+                                                message: __('Failed to approve Budget Request through workflow.'),
+                                                indicator: 'red'
+                                            });
+                                            reject();
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
+                        function process_budget_amendment() {
+                                    // STEP 2: After workflow approval, process budget amendment
+                                    frappe.call({
+                                        method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
+                                        args: {
+                                            'action': 'process_approval_with_amendment',
+                                            'doc_name': frm.doc.name,
+                                            'virement_type': frm.doc.virement_type,
+                                            'budget': frm.doc.budget,
+                                            'target_budget': frm.doc.target_budget || '',
+                                            'expense_account': frm.doc.expense_account,
+                                            'to_expense_account': frm.doc.to_expense_account,
+                                            'amount_requested': frm.doc.amount_requested
+                                        },
+                                        callback: function(r) {
+                                            if (r.message && r.message.success) {
+                                                frappe.show_alert({
+                                                    message: __('Budget approval completed successfully!'),
+                                                    indicator: 'green'
+                                                });
+                                                // Reload the form to show updated state
+                                                frm.reload_doc();
+                                                resolve(); // Allow workflow to continue
+                                            } else {
+                                    frappe.msgprint({
+                                        title: __('Approval Failed'),
+                                        message: r.message ? r.message.message : 'Unknown error occurred',
+                                        indicator: 'red'
+                                    });
+                                    reject(); // Block workflow
+                                }
+                            },
+                            error: function(err) {
+                                let error_msg = 'Unknown error';
+                                if (err.responseText) {
+                                    try {
+                                        let error_obj = JSON.parse(err.responseText);
+                                        error_msg = error_obj.message || error_obj.exc || err.responseText;
+                                    } catch (e) {
+                                        error_msg = err.responseText;
+                                    }
+                                } else if (err.statusText) {
+                                    error_msg = err.statusText;
+                                }
+
+                                frappe.msgprint({
+                                    title: __('Approval Failed'),
+                                    message: __('Error processing approval: ') + error_msg,
+                                    indicator: 'red'
+                                });
+                                reject(); // Block workflow
+                            }
+                        });
+                            }
+                        });
+                    },
+                    secondary_action_label: __('Cancel'),
+                    secondary_action: function() {
+                        dialog.hide();
+                        frappe.msgprint({
+                            title: __('Approval Cancelled'),
+                            message: __('Budget approval was cancelled by user.'),
+                            indicator: 'orange'
+                        });
+                        reject(); // Block workflow
+                    }
+                });
+
+                dialog.show();
+            });
+
+            // Return the promise to block workflow until resolved
+            return promise;
+        }
+    }
+});
+
+
+
+function setup_field_dependencies(frm) {
+    // Check if this is an amended document that we're still copying fields for
+    const is_amended_doc = frm.doc.amended_from && frm.is_new();
+
+    // Only set up dependencies for new documents (but not amended docs during field copying)
+    // For saved documents, just update field states without clearing values
+    if ((frm.is_new() || frm.doc.__islocal) && !is_amended_doc) {
+        if (frm.doc.virement_type) {
+            handle_virement_type_change(frm);
+        } else {
+            // Disable all fields until virement type is selected
+            disable_dependent_fields(frm);
+        }
+    } else {
+        // For saved documents or amended docs, just update field enabling/disabling
+        disable_dependent_fields(frm);
+
+        // Set up queries based on existing values without clearing
+        if (frm.doc.virement_type) {
+            setup_queries_for_existing_doc(frm);
+        }
+    }
+
+    // Check amount for external approval requirement (only for relevant states)
+    const final_states = ['Approved', 'Rejected'];
+    if (final_states.includes(frm.doc.workflow_state) || frm.doc.docstatus === 2) {
+        // Clear any existing messages for final states or cancelled documents
+        clear_external_approval_message(frm);
+    } else if (frm.doc.amount_requested) {
+        handle_amount_change(frm);
+    }
+
+    // Force refresh of all relevant fields
+    frm.refresh_field('budget');
+    frm.refresh_field('target_budget');
+    frm.refresh_field('expense_account');
+    frm.refresh_field('to_expense_account');
+}
+
+function disable_dependent_fields(frm) {
+    // Disable fields until prerequisites are met
+    frm.set_df_property('budget', 'read_only', !frm.doc.virement_type);
+    frm.set_df_property('target_budget', 'read_only', !frm.doc.virement_type);
+    frm.set_df_property('expense_account', 'read_only', !frm.doc.budget);
+    frm.set_df_property('to_expense_account', 'read_only', !can_enable_to_account(frm));
+}
+
+function can_enable_to_account(frm) {
+    // TO account can only be enabled when all prerequisites are met
+    if (!frm.doc.virement_type || !frm.doc.budget) {
+        return false;
+    }
+
+    if (frm.doc.virement_type === 'Inter-Budget') {
+        // For Inter-Budget: need virement_type, budget, target_budget
+        return frm.doc.target_budget;
+    } else if (frm.doc.virement_type === 'Intra-Budget') {
+        // For Intra-Budget: need virement_type, budget, expense_account
+        return frm.doc.expense_account;
+    }
+
+    return false;
+}
+
+function handle_virement_type_change(frm) {
+    // Don't clear fields if we're copying from amended document
+    if (frm._copying_amended_fields) return;
+
+    // Only clear fields if this is a new document or user is actively changing virement type
+    if (frm.is_new() || frm.doc.__islocal) {
+        // Clear ALL dependent fields when virement type changes
+        frm.set_value('budget', '');
+        frm.set_value('target_budget', '');
+        frm.set_value('expense_account', '');
+        frm.set_value('to_expense_account', '');
+    }
+
+    // Clear all field queries
+    frm.set_query('budget', function() { return {}; });
+    frm.set_query('target_budget', function() { return {}; });
+    frm.set_query('expense_account', function() { return {}; });
+    frm.set_query('to_expense_account', function() { return {}; });
+
+    if (frm.doc.virement_type === 'Inter-Budget') {
+        // Inter-Budget: Show target_budget field, make it required
+        frm.set_df_property('target_budget', 'hidden', 0);
+        frm.set_df_property('target_budget', 'reqd', 1);
+        frm.set_df_property('target_budget', 'read_only', 0);
+
+        // Enable budget field
+        frm.set_df_property('budget', 'read_only', 0);
+
+        // Filter source budget to show all budgets
+        frm.set_query('budget', function() {
+            return {
+                filters: {
+                    'docstatus': 1
+                }
+            };
+        });
+
+        // Clear target budget query initially
+        frm.set_query('target_budget', function() {
+            return {
+                filters: {
+                    'docstatus': 1
+                }
+            };
+        });
+
+    } else if (frm.doc.virement_type === 'Intra-Budget') {
+        // Intra-Budget: Hide target_budget field, not required
+        frm.set_df_property('target_budget', 'hidden', 1);
+        frm.set_df_property('target_budget', 'reqd', 0);
+        frm.set_df_property('target_budget', 'read_only', 1);
+
+        // Enable budget field
+        frm.set_df_property('budget', 'read_only', 0);
+
+        // Set source budget query to only show multi-account budgets
+        frappe.call({
+            method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
+            args: {
+                'action': 'get_multi_account_budgets'
+            },
+            callback: function(r) {
+                if (r.message && r.message.success) {
+                    let budget_names = r.message.data.map(b => b.value);
+                    frm.set_query('budget', function() {
+                        return {
+                            filters: [
+                                ['Budget', 'name', 'in', budget_names],
+                                ['Budget', 'docstatus', '=', 1]
+                            ]
+                        };
+                    });
+                    frm.refresh_field('budget');
+                }
+            }
+        });
+    }
+
+    // Update field states
+    disable_dependent_fields(frm);
+
+    // Clear account queries
+    frm.set_query('expense_account', function() { return {}; });
+    frm.set_query('to_expense_account', function() { return {}; });
+    frm.refresh_field('expense_account');
+    frm.refresh_field('to_expense_account');
+}
+
+function handle_budget_change(frm) {
+    // Don't auto-populate if we're copying from amended document
+    if (frm._copying_amended_fields) return;
+
+    if (frm.doc.budget) {
+        if (frm.doc.virement_type === 'Intra-Budget') {
+            // Auto-populate target_budget with source budget for intra-transfers
+            frm.set_value('target_budget', frm.doc.budget);
+        } else if (frm.doc.virement_type === 'Inter-Budget') {
+            // Update target budget query to exclude selected source budget
+            frm.set_query('target_budget', function() {
+                return {
+                    filters: [
+                        ['Budget', 'docstatus', '=', 1],
+                        ['Budget', 'name', '!=', frm.doc.budget]
+                    ]
+                };
+            });
+            frm.refresh_field('target_budget');
+        }
+
+        // Set FROM account query based on source budget
+        frappe.call({
+            method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
+            args: {
+                'action': 'get_budget_accounts',
+                'budget': frm.doc.budget
+            },
+            callback: function(r) {
+                if (r.message && r.message.success) {
+                    let account_names = r.message.data.map(a => a.value);
+                    frm.set_query('expense_account', function() {
+                        return {
+                            filters: [
+                                ['Account', 'name', 'in', account_names]
+                            ]
+                        };
+                    });
+                    frm.refresh_field('expense_account');
+                }
+            }
+        });
+
+        // Clear expense_account when budget changes
+        frm.set_value('expense_account', '');
+
+        // Enable expense_account field now that budget is selected
+        frm.set_df_property('expense_account', 'read_only', 0);
+    }
+
+    // ALWAYS clear TO account and its query when source budget changes
+    frm.set_value('to_expense_account', '');
+    frm.set_query('to_expense_account', function() { return {}; });
+
+    // Update field states
+    disable_dependent_fields(frm);
+    frm.refresh_field('to_expense_account');
+}
+
+function handle_target_budget_change(frm) {
+    if (frm.doc.target_budget && frm.doc.virement_type === 'Inter-Budget') {
+        // Set TO account filter based on target budget for Inter-Budget transfers
+        frappe.call({
+            method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
+            args: {
+                'action': 'get_budget_accounts',
+                'budget': frm.doc.target_budget
+            },
+            callback: function(r) {
+                if (r.message && r.message.success) {
+                    let account_names = r.message.data.map(a => a.value);
+                    frm.set_query('to_expense_account', function() {
+                        return {
+                            filters: [
+                                ['Account', 'name', 'in', account_names]
+                            ]
+                        };
+                    });
+                    frm.refresh_field('to_expense_account');
+                }
+            }
+        });
+
+        // Clear TO account when target budget changes
+        frm.set_value('to_expense_account', '');
+
+        // Update field states - TO account can now be enabled for Inter-Budget
+        disable_dependent_fields(frm);
+    }
+}
+
+function handle_expense_account_change(frm) {
+    // ALWAYS clear TO account when FROM account changes
+    frm.set_value('to_expense_account', '');
+
+    if (frm.doc.expense_account && frm.doc.virement_type === 'Intra-Budget') {
+        // Update TO account filter to exclude selected FROM account for Intra-Budget
+        frappe.call({
+            method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
+            args: {
+                'action': 'get_budget_accounts',
+                'budget': frm.doc.budget,
+                'exclude_account': frm.doc.expense_account
+            },
+            callback: function(r) {
+                if (r.message && r.message.success) {
+                    let account_names = r.message.data.map(a => a.value);
+                    frm.set_query('to_expense_account', function() {
+                        return {
+                            filters: [
+                                ['Account', 'name', 'in', account_names]
+                            ]
+                        };
+                    });
+                    frm.refresh_field('to_expense_account');
+                }
+            }
+        });
+    }
+
+    // Update field states - TO account can now be enabled for Intra-Budget
+    disable_dependent_fields(frm);
+}
+
+function handle_to_expense_account_change(frm) {
+    // Validation: TO account cannot be same as FROM account
+    if (frm.doc.to_expense_account && frm.doc.expense_account === frm.doc.to_expense_account) {
+        frappe.msgprint(__('TO account cannot be the same as FROM account'));
+        frm.set_value('to_expense_account', '');
+        return;
+    }
+}
+
+function validate_virement_request(frm) {
+    // Final validation before save
+    if (frm.doc.virement_type === 'Inter-Budget') {
+        if (frm.doc.budget === frm.doc.target_budget) {
+            frappe.msgprint(__('Target budget must be different from source budget for Inter-Budget transfers'));
+            return false;
+        }
+    }
+
+    if (frm.doc.expense_account === frm.doc.to_expense_account) {
+        frappe.msgprint(__('FROM and TO accounts must be different'));
+        return false;
+    }
+
+    return true;
+}
+
+function handle_amount_change(frm) {
+    // Don't show warnings for final states or cancelled documents
+    const final_states = ['Approved', 'Rejected'];
+    if (final_states.includes(frm.doc.workflow_state) || frm.doc.docstatus === 2) {
+        clear_external_approval_message(frm);
+        return;
+    }
+
+    // Validate budget availability and external approval requirements
+    if (frm.doc.amount_requested && frm.doc.expense_account && frm.doc.budget) {
+        frappe.call({
+            method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
+            args: {
+                'action': 'validate_budget_transfer',
+                'budget': frm.doc.budget,
+                'expense_account': frm.doc.expense_account,
+                'amount': frm.doc.amount_requested
+            },
+            callback: function(r) {
+                if (r.message && r.message.success) {
+                    // Check budget availability
+                    if (!r.message.sufficient_budget) {
+                        show_budget_insufficient_message(frm, r.message);
+                    } else {
+                        clear_budget_insufficient_message(frm);
+
+                        // Check external approval requirement
+                        if (Math.abs(frm.doc.amount_requested) > 250000) {
+                            frappe.call({
+                                method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
+                                args: {
+                                    'action': 'validate_amount_approval',
+                                    'amount': frm.doc.amount_requested
+                                },
+                                callback: function(r2) {
+                                    if (r2.message && r2.message.success) {
+                                        show_external_approval_message(frm, r2.message);
+                                    }
+                                }
+                            });
+                        } else {
+                            clear_external_approval_message(frm);
+                        }
+                    }
+                } else {
+                    clear_budget_insufficient_message(frm);
+                    clear_external_approval_message(frm);
+                }
+            }
+        });
+    } else {
+        clear_budget_insufficient_message(frm);
+        clear_external_approval_message(frm);
+    }
+}
+
+function show_external_approval_message(frm, validation_data) {
+    // Show context-aware message based on workflow state
+    let title, status_message, bg_color, border_color, text_color;
+
+    if (frm.doc.workflow_state === 'External Approval') {
+        title = '🔍 Under External Approval Review';
+        status_message = 'This request is currently under external approval review due to high amount.';
+        bg_color = '#e3f2fd';
+        border_color = '#90caf9';
+        text_color = '#1565c0';
+    } else if (frm.doc.workflow_state === 'Draft') {
+        title = '⚠️ External Approval Required';
+        status_message = 'This request will require external approval. Use "Submit for External Approval" action.';
+        bg_color = '#fff3cd';
+        border_color = '#ffeaa7';
+        text_color = '#856404';
+    } else {
+        title = '⚠️ High Amount Request';
+        status_message = 'This request exceeds the standard approval threshold.';
+        bg_color = '#fff3cd';
+        border_color = '#ffeaa7';
+        text_color = '#856404';
+    }
+
+    let message = `
+        <div style="padding: 10px; background-color: ${bg_color}; border: 1px solid ${border_color}; border-radius: 4px;">
+            <h4 style="color: ${text_color}; margin: 0 0 8px 0;">${title}</h4>
+            <p style="margin: 0; color: ${text_color};">
+                <strong>Amount:</strong> ${Math.abs(validation_data.amount).toLocaleString()}<br>
+                <strong>Threshold:</strong> ${validation_data.threshold.toLocaleString()}<br>
+                <strong>Status:</strong> ${status_message}
+            </p>
+        </div>
+    `;
+
+    frm.dashboard.clear_comment();
+    frm.dashboard.add_comment(message, 'orange', true);
+}
+
+function clear_external_approval_message(frm) {
+    // Clear any existing external approval messages
+    frm.dashboard.clear_comment();
+}
+
+function show_budget_insufficient_message(frm, validation_result) {
+    // Clear any existing budget insufficient message
+    clear_budget_insufficient_message(frm);
+
+    // Determine if this is an increase or decrease
+    const requested_amount = Math.abs(frm.doc.amount_requested);
+    const available_amount = validation_result.available_amount;
+    const is_increase = requested_amount > available_amount;
+    const difference = Math.abs(requested_amount - available_amount);
+
+    // Create budget change warning message (not blocking)
+    const message = `
+        <div style="padding: 15px; background-color: #fff3cd; border: 1px solid #ffeaa7; border-radius: 4px; color: #856404;">
+            <h4 style="margin: 0 0 8px 0; color: #856404;">
+                <i class="fa fa-info-circle"></i> Budget ${is_increase ? 'Increase' : 'Adjustment'} Required
+            </h4>
+            <p style="margin: 0;">
+                <strong>Current Budget:</strong> ${available_amount.toLocaleString()}<br>
+                <strong>Requested Amount:</strong> ${requested_amount.toLocaleString()}<br>
+                <strong>${is_increase ? 'Budget Increase' : 'Budget Change'}:</strong> ${difference.toLocaleString()}<br>
+                <em style="font-size: 12px;">Note: Approval will create amended budget with ${is_increase ? 'increased' : 'adjusted'} allocation</em>
+            </p>
+        </div>
+    `;
+
+    // Add to dashboard
+    frm.dashboard.clear_comment();
+    frm.dashboard.add_comment(message, 'yellow', true);
+}
+
+function clear_budget_insufficient_message(frm) {
+    // Clear any existing budget insufficient message
+    frm.dashboard.clear_comment();
+}
+
+function handle_external_approval_before_save(frm) {
+    // Don't automatically change workflow state - let users use action buttons
+    // Just show informational messages
+    if (frm.doc.amount_requested && Math.abs(frm.doc.amount_requested) > 250000) {
+        if (frm.doc.workflow_state === 'Draft') {
+            frappe.show_alert({
+                message: __('Amount exceeds 250,000 - consider using "Submit for External Approval" action'),
+                indicator: 'orange'
+            }, 5);
+        }
+    }
+    return true;
+}
+
+
+
+function show_approval_confirmation_dialog(frm) {
+    return new Promise((resolve, reject) => {
+        // Validate required fields first
+        if (!frm.doc.budget) {
+            frappe.throw(__("Please link the Budget document."));
+            reject('validation_failed');
+            return;
+        }
+
+        if (!frm.doc.expense_account || !frm.doc.to_expense_account) {
+            frappe.throw(__("Please select both From and To expense accounts."));
+            reject('validation_failed');
+            return;
+        }
+
+        if (frm.doc.expense_account === frm.doc.to_expense_account) {
+            frappe.throw(__("Cannot transfer to the same account."));
+            reject('validation_failed');
+            return;
+        }
+
+        if (!frm.doc.amount_requested || frm.doc.amount_requested <= 0) {
+            frappe.throw(__("Please enter a valid transfer amount."));
+            reject('validation_failed');
+            return;
+        }
+
+        // Get budget impact information first
+        frappe.call({
+            method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
+            args: {
+                'action': 'validate_budget_transfer',
+                'budget': frm.doc.budget,
+                'expense_account': frm.doc.expense_account,
+                'amount': frm.doc.amount_requested
+            },
+            callback: function(r) {
+                let budget_impact_html = '';
+
+                if (r.message && r.message.success) {
+                    const available = r.message.available_amount;
+                    const requested = Math.abs(frm.doc.amount_requested);
+                    const is_increase = requested > available;
+                    const difference = Math.abs(requested - available);
+
+                    budget_impact_html = `
+                        <div style="background-color: ${is_increase ? '#fff3cd' : '#d1ecf1'}; padding: 12px; border-radius: 4px; margin: 10px 0; border-left: 4px solid ${is_increase ? '#ffc107' : '#17a2b8'};">
+                            <h5 style="margin: 0 0 8px 0; color: ${is_increase ? '#856404' : '#0c5460'};">
+                                💰 Budget Impact: ${is_increase ? 'Increase Required' : 'Budget Adjustment'}
+                            </h5>
+                            <p style="margin: 0; font-size: 13px; color: ${is_increase ? '#856404' : '#0c5460'};">
+                                <strong>Current Budget:</strong> ${available.toLocaleString()}<br>
+                                <strong>New Amount:</strong> ${requested.toLocaleString()}<br>
+                                <strong>${is_increase ? 'Increase' : 'Change'}:</strong> ${difference.toLocaleString()}<br>
+                                <em>Account will be ${is_increase ? 'increased' : 'adjusted'} in amended budget</em>
+                            </p>
+                        </div>
+                    `;
+                }
+
+                // Show confirmation dialog with budget impact
+                let dialog = new frappe.ui.Dialog({
+                    title: __('Confirm Budget Request Approval'),
+                    fields: [
+                        {
+                            fieldtype: 'HTML',
+                            fieldname: 'approval_info',
+                            options: `
+                                <div style="padding: 15px; background-color: #f8f9fa; border-radius: 4px; margin-bottom: 15px;">
+                                    <h4 style="color: #495057; margin: 0 0 10px 0;">⚠️ Budget Amendment Process</h4>
+                                    <p style="margin: 0; color: #6c757d; line-height: 1.5;">
+                                        <strong>Approving this request will:</strong><br>
+                                        1. Cancel the current budget: <strong>${frm.doc.budget}</strong><br>
+                                        2. Check for linked documents (Journal Entries, Purchase Orders, etc.)<br>
+                                        3. Create an amended budget with the requested changes<br>
+                                        4. Submit the new budget for use<br><br>
+                                        <strong>Transfer Details:</strong><br>
+                                        • Type: <strong>${frm.doc.virement_type}</strong><br>
+                                        • Amount: <strong>${Math.abs(frm.doc.amount_requested || 0).toLocaleString()}</strong><br>
+                                        • From: <strong>${frm.doc.expense_account || 'N/A'}</strong><br>
+                                        • To: <strong>${frm.doc.to_expense_account || 'N/A'}</strong>
+                                        ${frm.doc.target_budget ? '<br>• Target Budget: <strong>' + frm.doc.target_budget + '</strong>' : ''}
+                                    </p>
+                                    ${budget_impact_html}
+                                </div>
+                            `
+                        },
+                        {
+                            fieldtype: 'Check',
+                            fieldname: 'confirm_understanding',
+                            label: __('I understand that this will cancel the current budget and create an amended version'),
+                            reqd: 1
+                        }
+                    ],
+                    primary_action_label: __('Approve Transfer'),
+                    primary_action: function(values) {
+                        if (values.confirm_understanding) {
+                            dialog.hide();
+
+                            // STEP 1: Refresh document and check if Budget Request is already approved
+                            frm.reload_doc().then(() => {
+                                if (frm.doc.workflow_state === 'Approved' && frm.doc.docstatus === 1) {
+                                    // Already approved, skip workflow and go directly to amendment
+                                    process_budget_amendment();
+                                } else {
+                                // STEP 1: First approve the Budget Request through workflow
+                                frm._custom_approval_in_progress = true; // Set flag to prevent hook interference
+                                frappe.call({
+                                    method: 'frappe.model.workflow.apply_workflow',
+                                    args: {
+                                        doc: frm.doc,
+                                        action: 'Approve'
+                                    },
+                                    callback: function(workflow_response) {
+                                        frm._custom_approval_in_progress = false; // Clear flag
+                                        if (workflow_response.message) {
+                                            process_budget_amendment();
+                                        } else {
+                                            // Check if it's just "Not a valid Workflow Action" - suppress this error
+                                            if (workflow_response.exc && workflow_response.exc.includes('Not a valid Workflow Action')) {
+                                                // Document is already approved, proceed with amendment
+                                                process_budget_amendment();
+                                            } else {
+                                                frappe.msgprint({
+                                                    title: __('Workflow Error'),
+                                                    message: __('Failed to approve Budget Request through workflow.'),
+                                                    indicator: 'red'
+                                                });
+                                                reject('workflow_error');
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+
+                            function process_budget_amendment() {
+                                        // STEP 2: After workflow approval, process budget amendment
+                                        frappe.call({
+                                            method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
+                                            args: {
+                                                'action': 'process_approval_with_amendment',
+                                                'doc_name': frm.doc.name,
+                                                'virement_type': frm.doc.virement_type,
+                                                'budget': frm.doc.budget,
+                                                'target_budget': frm.doc.target_budget || '',
+                                                'expense_account': frm.doc.expense_account,
+                                                'to_expense_account': frm.doc.to_expense_account,
+                                                'amount_requested': frm.doc.amount_requested
+                                            },
+                                            callback: function(r) {
+                                                if (r.message && r.message.success) {
+                                        frappe.show_alert({
+                                            message: __('Budget approval completed successfully!'),
+                                            indicator: 'green'
+                                        });
+
+                                        // Show detailed approval summary
+                                        show_approval_summary_dialog(frm, r.message);
+
+                                        // Resolve the promise to indicate success
+                                        resolve(r.message);
+                                    } else if (r.message && !r.message.success) {
+                                        frappe.msgprint({
+                                            title: __('Approval Failed'),
+                                            message: r.message.message || __('Unknown error occurred'),
+                                            indicator: 'red'
+                                        });
+                                        reject(r.message.message || 'approval_failed');
+                                    } else {
+                                        frappe.msgprint({
+                                            title: __('Error'),
+                                            message: __('Approval process failed. Please try again.'),
+                                            indicator: 'red'
+                                        });
+                                        reject('approval_failed');
+                                    }
+                                },
+                                error: function(err) {
+                                    frappe.msgprint({
+                                        title: __('Server Error'),
+                                        message: __('Failed to process approval: ') + (err.responseText || err.statusText),
+                                        indicator: 'red'
+                                    });
+                                    reject(err.responseText || err.statusText || 'server_error');
+                                }
+                            });
+                                }
+                            });
+                        } else {
+                            frappe.msgprint(__('Please confirm your understanding before proceeding'));
+                        }
+                    },
+                    secondary_action_label: __('Cancel'),
+                    secondary_action: function() {
+                        dialog.hide();
+                        // Reject the promise to indicate cancellation
+                        reject('cancelled');
+                    }
+                });
+
+                dialog.show();
+            },
+            error: function(err) {
+                frappe.msgprint({
+                    title: __('Validation Error'),
+                    message: __('Failed to validate budget transfer: ') + (err.responseText || err.statusText),
+                    indicator: 'red'
+                });
+                reject(err.responseText || err.statusText || 'validation_error');
+            }
+        });
+    });
+}
+
+function process_budget_approval(frm) {
+    // Show processing message
+    frappe.show_alert({
+        message: __('Processing budget approval...'),
+        indicator: 'blue'
+    });
+
+    // Validate required fields before calling server
+    if (!frm.doc.name || !frm.doc.virement_type || !frm.doc.budget || !frm.doc.expense_account || !frm.doc.to_expense_account || !frm.doc.amount_requested) {
+        frappe.msgprint({
+            title: __('Missing Information'),
+            message: 'Please ensure all required fields are filled before approving.',
+            indicator: 'red'
+        });
+        return;
+    }
+
+    // STEP 1: Refresh document and check if Budget Request is already approved
+    frm.reload_doc().then(() => {
+        if (frm.doc.workflow_state === 'Approved' && frm.doc.docstatus === 1) {
+            // Already approved, skip workflow and go directly to amendment
+            process_budget_amendment();
+        } else {
+        // STEP 1: First approve the Budget Request through workflow
+        frm._custom_approval_in_progress = true; // Set flag to prevent hook interference
+        frappe.call({
+            method: 'frappe.model.workflow.apply_workflow',
+            args: {
+                doc: frm.doc,
+                action: 'Approve'
+            },
+            callback: function(workflow_response) {
+                frm._custom_approval_in_progress = false; // Clear flag
+                if (workflow_response.message) {
+                    process_budget_amendment();
+                } else {
+                    // Check if it's just "Not a valid Workflow Action" - suppress this error
+                    if (workflow_response.exc && workflow_response.exc.includes('Not a valid Workflow Action')) {
+                        // Document is already approved, proceed with amendment
+                        process_budget_amendment();
+                    } else {
+                        frappe.msgprint({
+                            title: __('Workflow Error'),
+                            message: __('Failed to approve Budget Request through workflow.'),
+                            indicator: 'red'
+                        });
+                    }
+                }
+            }
+        });
+    }
+
+    function process_budget_amendment() {
+                // STEP 2: After workflow approval, process budget amendment
+                frappe.call({
+                    method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
+                    args: {
+                        'action': 'process_approval_with_amendment',
+                        'doc_name': frm.doc.name,
+                        'virement_type': frm.doc.virement_type,
+                        'budget': frm.doc.budget,
+                        'target_budget': frm.doc.target_budget || '',
+                        'expense_account': frm.doc.expense_account,
+                        'to_expense_account': frm.doc.to_expense_account,
+                        'amount_requested': frm.doc.amount_requested
+                    },
+                    callback: function(r) {
+                        if (r.message && r.message.success) {
+                frappe.show_alert({
+                    message: __('Budget approval completed successfully!'),
+                    indicator: 'green'
+                });
+
+                // Show detailed approval summary
+                show_approval_summary_dialog(frm, r.message);
+
+                // Refresh the form to show updated workflow state
+                frm.reload_doc();
+            } else {
+                frappe.msgprint({
+                    title: __('Approval Failed'),
+                    message: r.message ? r.message.message : 'Unknown error occurred',
+                    indicator: 'red'
+                });
+            }
+        },
+        error: function(r) {
+            frappe.msgprint({
+                title: __('Error'),
+                message: 'Failed to process approval: ' + (r.message || 'Unknown error'),
+                indicator: 'red'
+            });
+        }
+    });
+        }
+    });
+}
+
+function copy_fields_from_amended_doc(frm) {
+    // Copy field values from the original cancelled document
+    if (!frm.doc.amended_from) return;
+
+    frappe.call({
+        method: 'frappe.client.get',
+        args: {
+            doctype: 'Budget Request',
+            name: frm.doc.amended_from
+        },
+        callback: function(r) {
+            if (r.message) {
+                const original_doc = r.message;
+
+                // Mark that we're copying fields to prevent clearing
+                frm._copying_amended_fields = true;
+
+                // Copy all relevant fields from original document
+                const fields_to_copy = [
+                    'virement_type',
+                    'budget',
+                    'target_budget',
+                    'expense_account',
+                    'to_expense_account',
+                    'amount_requested',
+                    'cost_centre',
+                    'motivation',
+                    'remarks'
+                ];
+
+                // Copy fields without triggering change handlers
+                fields_to_copy.forEach(function(field) {
+                    if (original_doc[field] && !frm.doc[field]) {
+                        frm.doc[field] = original_doc[field];
+                        frm.refresh_field(field);
+                    }
+                });
+
+                // Set up field dependencies after copying values
+                setTimeout(function() {
+                    // Clear the copying flag
+                    frm._copying_amended_fields = false;
+
+                    // Set up queries and field states based on copied values
+                    disable_dependent_fields(frm);
+
+                    if (frm.doc.virement_type) {
+                        setup_queries_for_existing_doc(frm);
+                    }
+
+                    frappe.show_alert({
+                        message: __('Fields copied from cancelled document'),
+                        indicator: 'green'
+                    }, 3);
+                }, 500);
+            }
+        }
+    });
+}
+
+function setup_queries_for_existing_doc(frm) {
+    // Set up field queries for saved documents without clearing values
+    if (frm.doc.virement_type === 'Inter-Budget') {
+        // Set up queries for Inter-Budget
+        frm.set_query('budget', function() {
+            return { filters: { 'docstatus': 1 } };
+        });
+
+        if (frm.doc.budget) {
+            frm.set_query('target_budget', function() {
+                return {
+                    filters: [
+                        ['Budget', 'docstatus', '=', 1],
+                        ['Budget', 'name', '!=', frm.doc.budget]
+                    ]
+                };
+            });
+        }
+
+    } else if (frm.doc.virement_type === 'Intra-Budget') {
+        // Set up queries for Intra-Budget
+        frappe.call({
+            method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
+            args: { 'action': 'get_multi_account_budgets' },
+            callback: function(r) {
+                if (r.message && r.message.success) {
+                    let budget_names = r.message.data.map(b => b.value);
+                    frm.set_query('budget', function() {
+                        return {
+                            filters: [
+                                ['Budget', 'name', 'in', budget_names],
+                                ['Budget', 'docstatus', '=', 1]
+                            ]
+                        };
+                    });
+                }
+            }
+        });
+    }
+}
+
+function setup_workflow_interception(frm) {
+    // Add custom approve action to workflow dropdown and hide default approve
+    if (frm.doc.workflow_state === 'Budget Committee' || frm.doc.workflow_state === 'External Approval') {
+        // Override the page actions to add our custom approve option
+        setTimeout(function() {
+            // Find the Actions dropdown menu
+            const actionsDropdown = $('.dropdown-menu[role="menu"]');
+
+            if (actionsDropdown.length > 0) {
+                // Add our custom approve action at the top
+                const customApproveHtml = `
+                    <li class="user-action">
+                        <a class="grey-link dropdown-item" href="#" onclick="return false;" data-action="custom-approve">
+                            <span class="menu-item-label" data-label="Approve Request">
+                                <span><span class="alt-underline">A</span>pprove Request</span>
+                            </span>
+                        </a>
+                    </li>
+                `;
+
+                // Insert at the beginning of the dropdown
+                actionsDropdown.prepend(customApproveHtml);
+
+                // Hide the default Approve action
+                actionsDropdown.find('[data-label="Approve"]').parent().hide();
+
+                // Add click handler for our custom approve action
+                actionsDropdown.find('[data-action="custom-approve"]').on('click', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    show_approval_confirmation_dialog(frm);
+                    return false;
+                });
+            }
+        }, 1000);
+    }
+}
+
+function add_view_summary_button(frm) {
+    // Only show View Summary button for approved Budget Requests
+    if (frm.doc.workflow_state === 'Approved') {
+        const btn = frm.add_custom_button(__('View Summary'), function() {
+            show_virement_summary_dialog(frm);
+        });
+        // Make it prominent in the header (not in Actions menu)
+        if (btn && btn.addClass) {
+            btn.addClass('btn-primary');
+        }
+    }
+}
+
+function show_virement_summary_dialog(frm) {
+    // Call server method to get detailed summary (amended budgets + before/after amounts)
+    frappe.call({
+        method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
+        args: {
+            action: 'get_summary_details',
+            source_budget: frm.doc.budget,
+            target_budget: frm.doc.target_budget,
+            virement_type: frm.doc.virement_type,
+            from_account: frm.doc.expense_account,
+            to_account: frm.doc.to_expense_account
+        },
+        callback: function(r) {
+            const details = r && r.message ? r.message : { amended_budgets: [] };
+            show_summary_with_amendments(frm, details);
+        }
+    });
+}
+
+function show_summary_with_amendments(frm, details) {
+    // Data
+    const transfer_type = frm.doc.virement_type;
+    const amount = parseFloat(frm.doc.amount_requested).toLocaleString();
+    const from_account = frm.doc.expense_account;
+    const to_account = frm.doc.to_expense_account;
+    const from_budget = frm.doc.budget;
+    const to_budget = frm.doc.target_budget || from_budget;
+    const originals = transfer_type === 'Inter-Budget' ? [from_budget, to_budget] : [from_budget];
+
+    const amended = (details && Array.isArray(details.amended_budgets)) ? details.amended_budgets : [];
+    const fromInfo = (details && details.from) || {};
+    const toInfo = (details && details.to) || {};
+    const fmt = v => (v === null || v === undefined || isNaN(Number(v))) ? '—' : `K ${Number(v).toLocaleString()}`;
+
+    // Chips
+    const chip = (txt, color='#e9ecef') => `<span style=\"display:inline-block;margin:2px 6px 2px 0;padding:6px 10px;border-radius:999px;background:${color};font-size:12px;\">${frappe.utils.escape_html(txt)}</span>`;
+    const linkChip = (name, color='#d4edda') => `<a href=\"#Form/Budget/${encodeURIComponent(name)}\" style=\"text-decoration:none;\">${chip(name, color)}</a>`;
+
+    const originalChips = originals.map(n => linkChip(n, '#eef2ff')).join('');
+    const amendedChips = amended.length ? amended.map(n => linkChip(n, '#d4edda')).join('') : chip('Amendment created', '#fff3cd');
+
+    // Dialog with polished layout
+    const d = new frappe.ui.Dialog({
+        title: __('Budget Virement Summary'),
+        size: 'large'
+    });
+
+    const html = `
+        <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Ubuntu,Arial,sans-serif;">
+            <div style="background:linear-gradient(135deg,#1aa179,#2cb67d);color:#fff;border-radius:10px;padding:16px 18px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;">
+                <div style="font-weight:600;font-size:16px;display:flex;align-items:center;gap:8px;">
+                    <i class="fa fa-random"></i>
+                    <span>${frappe.utils.escape_html(transfer_type)}</span>
+                </div>
+                <div style="font-weight:700;font-size:18px;">K ${amount}</div>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                <div style="background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;padding:12px;">
+                    <div style="font-weight:600;margin-bottom:8px;color:#334155;">Transfer Details</div>
+                    <div style="display:flex;flex-direction:column;gap:6px;font-size:13px;color:#334155;">
+                        <div><span style="opacity:.7">From Account:</span> ${frappe.utils.escape_html(from_account || '')}</div>
+                        <div><span style="opacity:.7">To Account:</span> ${frappe.utils.escape_html(to_account || '')}</div>
+                        <div><span style="opacity:.7">From Budget:</span> ${linkChip(from_budget, '#eef2ff')}</div>
+                        ${transfer_type === 'Inter-Budget' ? `<div><span style="opacity:.7">To Budget:</span> ${linkChip(to_budget, '#eef2ff')}</div>` : ''}
+                    </div>
+                </div>
+
+                <div style="background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;padding:12px;">
+                    <div style="font-weight:600;margin-bottom:8px;color:#334155;">Budget Changes</div>
+                    <div style="font-size:13px;color:#334155;">
+                        <div style="margin-bottom:6px;"><span style="opacity:.7">Original Budget(s):</span> ${originalChips}</div>
+                        <div style="margin-bottom:6px;"><span style="opacity:.7">Amended Budget(s):</span> ${amendedChips}</div>
+                        <div style="opacity:.8">Original budgets cancelled, amended budgets created.</div>
+                    </div>
+                </div>
+            </div>
+
+            <div style="background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;padding:12px;margin-top:12px;">
+                <div style="font-weight:600;margin-bottom:8px;color:#334155;">Amounts (Before → After)</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                    <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:12px;">
+                        <div style="font-weight:600;margin-bottom:6px;color:#334155;">From Account</div>
+                        <div style="font-size:13px;color:#334155;">
+                            <div style="opacity:.7">${frappe.utils.escape_html(from_account || '')} (${frappe.utils.escape_html(fromInfo.budget || from_budget)})</div>
+                            <div style="margin-top:6px;display:flex;align-items:center;gap:8px;">
+                                <span>${fmt(fromInfo.before)}</span>
+                                <i class="fa fa-long-arrow-right" style="opacity:.6"></i>
+                                <span style="font-weight:600;color:#b91c1c;">${fmt(fromInfo.after)}</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:12px;">
+                        <div style="font-weight:600;margin-bottom:6px;color:#334155;">To Account</div>
+                        <div style="font-size:13px;color:#334155;">
+                            <div style="opacity:.7">${frappe.utils.escape_html(to_account || '')} (${frappe.utils.escape_html(toInfo.budget || to_budget)})</div>
+                            <div style="margin-top:6px;display:flex;align-items:center;gap:8px;">
+                                <span>${fmt(toInfo.before)}</span>
+                                <i class="fa fa-long-arrow-right" style="opacity:.6"></i>
+                                <span style="font-weight:600;color:#166534;">${fmt(toInfo.after)}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div style="background:#f1f5f9;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-top:12px;">
+                <div style="font-weight:600;margin-bottom:6px;color:#334155;">Approval Information</div>
+                <div style="font-size:13px;color:#334155;display:flex;gap:18px;flex-wrap:wrap;">
+                    <div><span style="opacity:.7">Approved Date:</span> ${frappe.datetime.str_to_user(frm.doc.modified)}</div>
+                    <div><span style="opacity:.7">Approved By:</span> ${frappe.utils.escape_html(frm.doc.modified_by || '')}</div>
+                    <div><span style="opacity:.7">Request Status:</span> ${frappe.utils.escape_html(frm.doc.workflow_state || '')}</div>
+                </div>
+            </div>
+        </div>`;
+
+    d.$body.html(html);
+    d.set_primary_action(__('Close'), () => d.hide());
+    d.show();
+}
+
+function show_approval_summary_dialog(frm, response_data) {
+    // Create detailed approval summary
+    const transfer_type = frm.doc.virement_type;
+    const amount = parseFloat(frm.doc.amount_requested).toLocaleString();
+    const from_account = frm.doc.expense_account;
+    const to_account = frm.doc.to_expense_account;
+    const from_budget = frm.doc.budget;
+    const to_budget = frm.doc.target_budget || from_budget;
+
+    let summary_html = `
+        <div style="padding: 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+            <div style="text-align: center; margin-bottom: 20px;">
+                <h3 style="color: #28a745; margin: 0;">
+                    <i class="fa fa-check-circle" style="margin-right: 8px;"></i>
+                    Budget Request Approved Successfully
+                </h3>
+            </div>
+
+            <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+                <h4 style="color: #495057; margin-top: 0;">Transfer Details</h4>
+                <table style="width: 100%; border-collapse: collapse;">
+                    <tr>
+                        <td style="padding: 5px 0; font-weight: bold;">Transfer Type:</td>
+                        <td style="padding: 5px 0;">${transfer_type}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 5px 0; font-weight: bold;">Amount:</td>
+                        <td style="padding: 5px 0; color: #007bff; font-weight: bold;">K ${amount}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 5px 0; font-weight: bold;">From Account:</td>
+                        <td style="padding: 5px 0;">${from_account}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 5px 0; font-weight: bold;">To Account:</td>
+                        <td style="padding: 5px 0;">${to_account}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 5px 0; font-weight: bold;">From Budget:</td>
+                        <td style="padding: 5px 0;">${from_budget}</td>
+                    </tr>
+                    ${transfer_type === 'Inter-Budget' ? `
+                    <tr>
+                        <td style="padding: 5px 0; font-weight: bold;">To Budget:</td>
+                        <td style="padding: 5px 0;">${to_budget}</td>
+                    </tr>
+                    ` : ''}
+                </table>
+            </div>
+
+            <div style="background: #e8f5e8; padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+                <h4 style="color: #155724; margin-top: 0;">Budget Changes</h4>
+                <p style="margin: 5px 0;"><strong>Original Budget(s):</strong> ${response_data.original_budget}</p>
+                <p style="margin: 5px 0;"><strong>New Amended Budget(s):</strong> ${response_data.amended_budget}</p>
+                <p style="margin: 5px 0;"><strong>Status:</strong> Original budgets cancelled, amended budgets created in Draft state</p>
+            </div>
+
+            <div style="background: #fff3cd; padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+                <h4 style="color: #856404; margin-top: 0;">Next Steps</h4>
+                <ul style="margin: 5px 0; padding-left: 20px;">
+                    <li>Amended budgets are in <strong>Draft</strong> state</li>
+                    <li>Budget managers can review and approve amended budgets through normal workflow</li>
+                    <li>Original budgets have been cancelled for audit trail</li>
+                </ul>
+            </div>
+
+            ${response_data.cancelled_documents ? `
+            <div style="background: #f8d7da; padding: 15px; border-radius: 8px;">
+                <h4 style="color: #721c24; margin-top: 0;">Cancelled Documents</h4>
+                <p style="margin: 5px 0;">${response_data.cancelled_documents}</p>
+            </div>
+            ` : ''}
+        </div>
+    `;
+
+    frappe.msgprint({
+        title: __('Budget Virement Completed'),
+        message: summary_html,
+        indicator: 'green',
+        wide: true
+    });
+}
+
+
+
+// Clean, focused client script for virement field filtering only

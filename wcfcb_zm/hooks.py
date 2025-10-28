@@ -1,3 +1,5 @@
+import frappe
+
 app_name = "wcfcb_zm"
 app_title = "WCFCB ZM"
 app_publisher = "elius mgani"
@@ -11,7 +13,7 @@ app_license = "mit"
 
 # Include CSS and JS files in desk.html (Frappe Desk interface)
 app_include_css = ["/assets/wcfcb_zm/css/custom_theme.css"]
-app_include_js = ["/assets/wcfcb_zm/js/wcfcb_theme.js"]
+app_include_js = ["/assets/wcfcb_zm/js/wcfcb_theme.js", "/assets/wcfcb_zm/js/budget_request.js"]
 
 # Include CSS and JS files in web templates (Website pages)
 web_include_css = ["/assets/wcfcb_zm/css/custom_theme.css"]
@@ -41,6 +43,11 @@ web_include_js = ["/assets/wcfcb_zm/js/wcfcb_theme.js"]
 doctype_list_js = {
     "Custom Field": "wcfcb_zm/patches/custom_field.js",
     "Property Setter": "wcfcb_zm/patches/property_setter.js",
+}
+
+# Client scripts for specific doctypes
+doctype_js = {
+    "Budget Request": "wcfcb_zm/public/js/budget_request.js"
 }
 
 # Svg Icons
@@ -245,3 +252,28 @@ override_whitelisted_methods = {
 # 	"Logging DocType Name": 30  # days to retain logs
 # }
 
+
+# Simple whitelisted method for testing - defined directly in hooks.py
+# Note: frappe.whitelist decorator will be applied when frappe is fully loaded
+
+
+
+
+
+
+
+
+
+
+# Backward-compatibility wrappers for older client scripts calling hooks.*
+@frappe.whitelist(allow_guest=False)
+def budget_virement_handler(action, **kwargs):
+    """Proxy to the real API handler in wcfcb_zm.api.budget_request"""
+    from wcfcb_zm.api.budget_request import budget_virement_handler as real_handler
+    return real_handler(action, **kwargs)
+
+@frappe.whitelist(allow_guest=False)
+def simple_budget_handler(action, **kwargs):
+    """Proxy to the real API handler in wcfcb_zm.api.budget_request"""
+    from wcfcb_zm.api.budget_request import budget_virement_handler as real_handler
+    return real_handler(action, **kwargs)

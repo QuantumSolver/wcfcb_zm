@@ -18,7 +18,7 @@ frappe.ready(function() {
                             info: __("Light Theme"),
                         },
                         {
-                            name: "dark", 
+                            name: "dark",
                             label: __("Timeless Night"),
                             info: __("Dark Theme"),
                         },
@@ -47,7 +47,7 @@ frappe.ready(function() {
     if (frappe.boot && frappe.boot.user && frappe.boot.user.theme === 'wcfcb_theme') {
         document.documentElement.setAttribute('data-theme', 'wcfcb_theme');
     }
-    
+
     // Also check localStorage for theme preference
     const savedTheme = localStorage.getItem('theme');
     if (savedTheme === 'wcfcb_theme') {
@@ -73,4 +73,29 @@ $(document).ready(function() {
             document.documentElement.setAttribute('data-theme', 'wcfcb_theme');
         }
     }, 100);
+});
+
+
+// Global debug helpers to confirm app JS loads and detect Budget Request form route
+frappe.ready(function() {
+    try {
+        console.log('[WCFCB ZM] Global/theme script loaded at', new Date().toISOString());
+    } catch (e) {}
+
+    if (frappe.router && frappe.router.on) {
+        frappe.router.on('change', () => {
+            try {
+                const r = frappe.get_route ? frappe.get_route() : [];
+                if (r && r[0] === 'Form' && r[1] === 'Budget Request') {
+                    frappe.show_alert({
+                        message: __('WCFCB ZM: Global router detected Budget Request'),
+                        indicator: 'green'
+                    });
+                    console.log('[WCFCB ZM] Global router: Budget Request route detected at', new Date().toISOString(), r);
+                }
+            } catch (e) {
+                // no-op
+            }
+        });
+    }
 });
