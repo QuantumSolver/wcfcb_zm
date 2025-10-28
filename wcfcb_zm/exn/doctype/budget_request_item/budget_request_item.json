@@ -1,0 +1,93 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2024-10-28 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "from_account",
+  "from_available",
+  "column_break_1",
+  "amount_requested",
+  "from_remaining",
+  "section_break_2",
+  "to_account",
+  "to_available",
+  "column_break_2",
+  "to_new_amount"
+ ],
+ "fields": [
+  {
+   "fieldname": "from_account",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "From Account",
+   "options": "Account",
+   "reqd": 1
+  },
+  {
+   "fieldname": "from_available",
+   "fieldtype": "Currency",
+   "label": "Available Balance",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "amount_requested",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Amount to Transfer",
+   "reqd": 1
+  },
+  {
+   "fieldname": "from_remaining",
+   "fieldtype": "Currency",
+   "label": "Remaining Balance",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_2",
+   "fieldtype": "Section Break",
+   "label": "Target Account"
+  },
+  {
+   "fieldname": "to_account",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "To Account",
+   "options": "Account",
+   "reqd": 1
+  },
+  {
+   "fieldname": "to_available",
+   "fieldtype": "Currency",
+   "label": "Current Balance",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "to_new_amount",
+   "fieldtype": "Currency",
+   "label": "New Balance",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2024-10-28 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "EXN",
+ "name": "Budget Request Item",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

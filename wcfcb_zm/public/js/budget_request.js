@@ -72,10 +72,35 @@ frappe.ui.form.on('Budget Request', {
         if (frm.selected_workflow_action === 'Approve') {
             let promise = new Promise((resolve, reject) => {
                 // Validate required fields first
-                if (!frm.doc.budget || !frm.doc.expense_account || !frm.doc.to_expense_account || !frm.doc.amount_requested) {
+                let validation_error = null;
+
+                if (!frm.doc.budget) {
+                    validation_error = 'Budget is required';
+                } else if (is_multi_transfer_mode(frm)) {
+                    // Multi-transfer validation
+                    if (!frm.doc.transfer_items || frm.doc.transfer_items.length === 0) {
+                        validation_error = 'At least one transfer item is required for multi-transfer mode';
+                    } else {
+                        // Check each transfer item
+                        for (let i = 0; i < frm.doc.transfer_items.length; i++) {
+                            let item = frm.doc.transfer_items[i];
+                            if (!item.from_account || !item.to_account || !item.amount_requested) {
+                                validation_error = `Transfer item ${i + 1}: All fields are required`;
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    // Single-transfer validation
+                    if (!frm.doc.expense_account || !frm.doc.to_expense_account || !frm.doc.amount_requested) {
+                        validation_error = 'From Account, To Account, and Amount are required';
+                    }
+                }
+
+                if (validation_error) {
                     frappe.msgprint({
                         title: __('Missing Information'),
-                        message: __('Please ensure all required fields are filled before approving.'),
+                        message: __(validation_error),
                         indicator: 'red'
                     });
                     reject();
@@ -101,17 +126,7 @@ frappe.ui.form.on('Budget Request', {
                                         Are you sure you want to approve this budget virement?
                                     </h4>
 
-                                    <div style="background: #f8f9fa; padding: 12px; border-radius: 4px; margin-bottom: 15px;">
-                                        <h5 style="margin-bottom: 10px;">Transfer Details:</h5>
-                                        <ul style="margin: 0; padding-left: 20px;">
-                                            <li><strong>Type:</strong> ${frm.doc.virement_type}</li>
-                                            <li><strong>Amount:</strong> K ${Math.abs(frm.doc.amount_requested || 0).toLocaleString()}</li>
-                                            <li><strong>From:</strong> ${frm.doc.expense_account}</li>
-                                            <li><strong>To:</strong> ${frm.doc.to_expense_account}</li>
-                                            <li><strong>Budget:</strong> ${frm.doc.budget}</li>
-                                            ${frm.doc.target_budget ? '<li><strong>Target Budget:</strong> ' + frm.doc.target_budget + '</li>' : ''}
-                                        </ul>
-                                    </div>
+                                    ${generate_transfer_details_html(frm)}
 
                                     <div style="background: #fff3cd; padding: 10px; border-radius: 4px; border-left: 4px solid #ffc107;">
                                         <small><em>This will cancel the current budget and create an amended version.</em></small>
@@ -237,7 +252,161 @@ frappe.ui.form.on('Budget Request', {
     }
 });
 
+// Child Table Events for Budget Request Item (Multi-Transfer Support)
+frappe.ui.form.on('Budget Request Item', {
+    from_account: function(frm, cdt, cdn) {
+        let row = locals[cdt][cdn];
+        if (row.from_account) {
+            // Fetch available balance for from_account
+            fetch_account_balance(frm, row.from_account, 'from_available', cdt, cdn);
+        } else {
+            // Clear related fields
+            frappe.model.set_value(cdt, cdn, 'from_available', 0);
+            frappe.model.set_value(cdt, cdn, 'from_remaining', 0);
+        }
+    },
 
+    to_account: function(frm, cdt, cdn) {
+        let row = locals[cdt][cdn];
+        if (row.to_account) {
+            // Fetch available balance for to_account
+            fetch_account_balance(frm, row.to_account, 'to_available', cdt, cdn);
+        } else {
+            // Clear related fields
+            frappe.model.set_value(cdt, cdn, 'to_available', 0);
+            frappe.model.set_value(cdt, cdn, 'to_new_amount', 0);
+        }
+    },
+
+    amount_requested: function(frm, cdt, cdn) {
+        calculate_transfer_item_balances(frm, cdt, cdn);
+    },
+
+    transfer_items_remove: function(frm) {
+        // Recalculate totals when item is removed
+        calculate_total_transfer_amount(frm);
+    },
+
+    transfer_items_add: function(frm) {
+        // Set default values for new row if needed
+        let new_row = frm.doc.transfer_items[frm.doc.transfer_items.length - 1];
+        if (new_row) {
+            // Could set default values here if needed
+        }
+    }
+});
+
+function fetch_account_balance(frm, account, target_field, cdt, cdn) {
+    if (!account || !frm.doc.budget) return;
+
+    // Call server to get account balance from budget
+    frappe.call({
+        method: 'wcfcb_zm.api.budget_request.get_account_balance_from_budget',
+        args: {
+            budget_name: frm.doc.budget,
+            account: account
+        },
+        callback: function(r) {
+            if (r.message && r.message.success) {
+                frappe.model.set_value(cdt, cdn, target_field, r.message.available_balance);
+                // Recalculate balances after setting available balance
+                calculate_transfer_item_balances(frm, cdt, cdn);
+            } else {
+                frappe.model.set_value(cdt, cdn, target_field, 0);
+            }
+        }
+    });
+}
+
+function calculate_transfer_item_balances(frm, cdt, cdn) {
+    let row = locals[cdt][cdn];
+
+    // Calculate from_remaining
+    if (row.from_available && row.amount_requested) {
+        let remaining = flt(row.from_available) - flt(row.amount_requested);
+        frappe.model.set_value(cdt, cdn, 'from_remaining', remaining);
+    }
+
+    // Calculate to_new_amount
+    if (row.to_available && row.amount_requested) {
+        let new_amount = flt(row.to_available) + flt(row.amount_requested);
+        frappe.model.set_value(cdt, cdn, 'to_new_amount', new_amount);
+    }
+
+    // Calculate total transfer amount
+    calculate_total_transfer_amount(frm);
+}
+
+function calculate_total_transfer_amount(frm) {
+    let total = 0;
+    if (frm.doc.transfer_items) {
+        frm.doc.transfer_items.forEach(function(item) {
+            if (item.amount_requested) {
+                total += flt(item.amount_requested);
+            }
+        });
+    }
+
+    // Store total for validation purposes
+    frm._total_transfer_amount = total;
+
+    // Update display or validation as needed
+    frm.refresh_field('transfer_items');
+}
+
+function is_multi_transfer_mode(frm) {
+    return frm.doc.transfer_items && frm.doc.transfer_items.length > 0;
+}
+
+function generate_transfer_details_html(frm) {
+    if (is_multi_transfer_mode(frm)) {
+        // Multi-transfer mode
+        let total_amount = 0;
+        let transfer_items_html = '';
+
+        frm.doc.transfer_items.forEach(function(item, index) {
+            if (item.amount_requested) {
+                total_amount += flt(item.amount_requested);
+                transfer_items_html += `
+                    <li><strong>Transfer ${index + 1}:</strong> K ${Math.abs(item.amount_requested || 0).toLocaleString()}
+                        from ${item.from_account} to ${item.to_account}</li>
+                `;
+            }
+        });
+
+        return `
+            <div style="background: #f8f9fa; padding: 12px; border-radius: 4px; margin-bottom: 15px;">
+                <h5 style="margin-bottom: 10px;">Multi-Transfer Details:</h5>
+                <ul style="margin: 0; padding-left: 20px;">
+                    <li><strong>Type:</strong> ${frm.doc.virement_type}</li>
+                    <li><strong>Total Amount:</strong> K ${Math.abs(total_amount).toLocaleString()}</li>
+                    <li><strong>Number of Transfers:</strong> ${frm.doc.transfer_items.length}</li>
+                    <li><strong>Budget:</strong> ${frm.doc.budget}</li>
+                    ${frm.doc.target_budget ? '<li><strong>Target Budget:</strong> ' + frm.doc.target_budget + '</li>' : ''}
+                </ul>
+                <h6 style="margin-top: 15px; margin-bottom: 10px;">Individual Transfers:</h6>
+                <ul style="margin: 0; padding-left: 20px;">
+                    ${transfer_items_html}
+                </ul>
+            </div>
+        `;
+    } else {
+        // Single-transfer mode (backward compatibility)
+        return `
+            <div style="background: #f8f9fa; padding: 12px; border-radius: 4px; margin-bottom: 15px;">
+                <h5 style="margin-bottom: 10px;">Transfer Details:</h5>
+                <ul style="margin: 0; padding-left: 20px;">
+                    <li><strong>Type:</strong> ${frm.doc.virement_type}</li>
+                    <li><strong>Amount:</strong> K ${Math.abs(frm.doc.amount_requested || 0).toLocaleString()}</li>
+                    <li><strong>From:</strong> ${frm.doc.expense_account}</li>
+                    <li><strong>To:</strong> ${frm.doc.to_expense_account}</li>
+                    <li><strong>Budget:</strong> ${frm.doc.budget}</li>
+                    ${frm.doc.target_budget ? '<li><strong>Target Budget:</strong> ' + frm.doc.target_budget + '</li>' : ''}
+                </ul>
+            </div>
+        `;
+    }
+}
 
 function setup_field_dependencies(frm) {
     // Check if this is an amended document that we're still copying fields for
@@ -533,9 +702,61 @@ function validate_virement_request(frm) {
         }
     }
 
-    if (frm.doc.expense_account === frm.doc.to_expense_account) {
-        frappe.msgprint(__('FROM and TO accounts must be different'));
-        return false;
+    // Check if using multi-transfer mode
+    if (is_multi_transfer_mode(frm)) {
+        // Multi-transfer validation
+        if (!frm.doc.transfer_items || frm.doc.transfer_items.length === 0) {
+            frappe.msgprint(__('At least one transfer item is required for multi-transfer mode'));
+            return false;
+        }
+
+        // Validate each transfer item
+        for (let i = 0; i < frm.doc.transfer_items.length; i++) {
+            let item = frm.doc.transfer_items[i];
+
+            if (!item.from_account || !item.to_account || !item.amount_requested) {
+                frappe.msgprint(__(`Transfer item ${i + 1}: All fields (From Account, To Account, Amount) are required`));
+                return false;
+            }
+
+            if (item.from_account === item.to_account) {
+                frappe.msgprint(__(`Transfer item ${i + 1}: FROM and TO accounts must be different`));
+                return false;
+            }
+
+            if (item.amount_requested <= 0) {
+                frappe.msgprint(__(`Transfer item ${i + 1}: Amount must be greater than zero`));
+                return false;
+            }
+        }
+
+        // Ensure single-transfer fields are empty in multi-transfer mode
+        if (frm.doc.expense_account || frm.doc.to_expense_account || frm.doc.amount_requested) {
+            frappe.msgprint(__('Please use either single-transfer fields OR multi-transfer table, not both'));
+            return false;
+        }
+    } else {
+        // Single-transfer validation (backward compatibility)
+        if (!frm.doc.expense_account || !frm.doc.to_expense_account || !frm.doc.amount_requested) {
+            frappe.msgprint(__('For single-transfer mode: From Account, To Account, and Amount are required'));
+            return false;
+        }
+
+        if (frm.doc.expense_account === frm.doc.to_expense_account) {
+            frappe.msgprint(__('FROM and TO accounts must be different'));
+            return false;
+        }
+
+        if (frm.doc.amount_requested <= 0) {
+            frappe.msgprint(__('Amount must be greater than zero'));
+            return false;
+        }
+
+        // Ensure multi-transfer table is empty in single-transfer mode
+        if (frm.doc.transfer_items && frm.doc.transfer_items.length > 0) {
+            frappe.msgprint(__('Please use either single-transfer fields OR multi-transfer table, not both'));
+            return false;
+        }
     }
 
     return true;
@@ -914,10 +1135,35 @@ function process_budget_approval(frm) {
     });
 
     // Validate required fields before calling server
-    if (!frm.doc.name || !frm.doc.virement_type || !frm.doc.budget || !frm.doc.expense_account || !frm.doc.to_expense_account || !frm.doc.amount_requested) {
+    let validation_error = null;
+
+    if (!frm.doc.name || !frm.doc.virement_type || !frm.doc.budget) {
+        validation_error = 'Name, Virement Type, and Budget are required';
+    } else if (is_multi_transfer_mode(frm)) {
+        // Multi-transfer validation
+        if (!frm.doc.transfer_items || frm.doc.transfer_items.length === 0) {
+            validation_error = 'At least one transfer item is required for multi-transfer mode';
+        } else {
+            // Check each transfer item
+            for (let i = 0; i < frm.doc.transfer_items.length; i++) {
+                let item = frm.doc.transfer_items[i];
+                if (!item.from_account || !item.to_account || !item.amount_requested) {
+                    validation_error = `Transfer item ${i + 1}: All fields are required`;
+                    break;
+                }
+            }
+        }
+    } else {
+        // Single-transfer validation
+        if (!frm.doc.expense_account || !frm.doc.to_expense_account || !frm.doc.amount_requested) {
+            validation_error = 'From Account, To Account, and Amount are required';
+        }
+    }
+
+    if (validation_error) {
         frappe.msgprint({
             title: __('Missing Information'),
-            message: 'Please ensure all required fields are filled before approving.',
+            message: validation_error,
             indicator: 'red'
         });
         return;

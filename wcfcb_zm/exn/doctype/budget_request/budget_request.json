@@ -1,0 +1,170 @@
+{
+ "actions": [],
+ "allow_copy": 0,
+ "allow_import": 0,
+ "allow_rename": 0,
+ "autoname": "autoincrement",
+ "beta": 0,
+ "creation": "2024-10-28 12:00:00.000000",
+ "custom": 1,
+ "doctype": "DocType",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "virement_information_section",
+  "virement_type",
+  "section_break_rlmv",
+  "budget",
+  "cost_centre",
+  "amount_requested",
+  "requested_date",
+  "amended_from",
+  "column_break_sfis",
+  "target_budget",
+  "section_break_yams",
+  "expense_account",
+  "column_break_qrxn",
+  "to_expense_account",
+  "multi_transfer_section",
+  "transfer_items",
+  "additional_information_section",
+  "motivation",
+  "remarks"
+ ],
+ "fields": [
+  {
+   "fieldname": "virement_information_section",
+   "fieldtype": "Section Break",
+   "label": "Virement Information"
+  },
+  {
+   "fieldname": "virement_type",
+   "fieldtype": "Select",
+   "label": "Virement Type",
+   "options": "Intra-Budget\nInter-Budget"
+  },
+  {
+   "fieldname": "section_break_rlmv",
+   "fieldtype": "Section Break",
+   "label": "Budget information"
+  },
+  {
+   "fieldname": "budget",
+   "fieldtype": "Link",
+   "label": "Source Budget",
+   "options": "Budget"
+  },
+  {
+   "fieldname": "cost_centre",
+   "fieldtype": "Link",
+   "fetch_from": "budget.cost_center",
+   "label": "Cost Centre",
+   "options": "Cost Center",
+   "read_only": 1
+  },
+  {
+   "fieldname": "amount_requested",
+   "fieldtype": "Currency",
+   "label": "Amount requested"
+  },
+  {
+   "fieldname": "requested_date",
+   "fieldtype": "Date",
+   "label": "Requested Date"
+  },
+  {
+   "fieldname": "amended_from",
+   "fieldtype": "Link",
+   "label": "Amended From",
+   "no_copy": 1,
+   "options": "Budget Request",
+   "print_hide": 1,
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "column_break_sfis",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "target_budget",
+   "fieldtype": "Link",
+   "label": "Target Budget ",
+   "options": "Budget"
+  },
+  {
+   "fieldname": "section_break_yams",
+   "fieldtype": "Section Break",
+   "label": "Account information"
+  },
+  {
+   "fieldname": "expense_account",
+   "fieldtype": "Link",
+   "label": "From Expense Account",
+   "options": "Account"
+  },
+  {
+   "fieldname": "column_break_qrxn",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "to_expense_account",
+   "fieldtype": "Link",
+   "label": "To Expense Account",
+   "options": "Account"
+  },
+  {
+   "fieldname": "multi_transfer_section",
+   "fieldtype": "Section Break",
+   "label": "Multi-Account Transfers"
+  },
+  {
+   "fieldname": "transfer_items",
+   "fieldtype": "Table",
+   "label": "Transfer Items",
+   "options": "Budget Request Item"
+  },
+  {
+   "fieldname": "additional_information_section",
+   "fieldtype": "Section Break",
+   "label": "Additional information"
+  },
+  {
+   "fieldname": "motivation",
+   "fieldtype": "Small Text",
+   "label": "Motivation"
+  },
+  {
+   "fieldname": "remarks",
+   "fieldtype": "Small Text",
+   "label": "Remarks"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "is_submittable": 1,
+ "links": [],
+ "modified": "2024-10-28 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "EXN",
+ "name": "Budget Request",
+ "naming_rule": "Autoincrement",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

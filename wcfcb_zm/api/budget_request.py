@@ -111,6 +111,52 @@ def get_multi_account_budgets():
             'message': 'Error fetching multi-account budgets: ' + str(e)
         }
 
+@frappe.whitelist()
+def get_account_balance_from_budget(budget_name, account):
+    """Get available balance for a specific account from a budget"""
+    try:
+        if not budget_name or not account:
+            frappe.response['message'] = {
+                'success': False,
+                'message': 'Budget name and account are required'
+            }
+            return
+
+        # Get budget account data
+        budget_account = frappe.db.sql("""
+            SELECT budget_amount
+            FROM `tabBudget Account`
+            WHERE parent = %s AND account = %s
+        """, (budget_name, account), as_dict=True)
+
+        if not budget_account:
+            frappe.response['message'] = {
+                'success': False,
+                'message': f'Account {account} not found in budget {budget_name}'
+            }
+            return
+
+        budget_amount = float(budget_account[0]['budget_amount'])
+
+        # Calculate actual expenses (this is a simplified version)
+        # In a real implementation, you might want to calculate actual expenses from GL entries
+        actual_expenses = 0  # Placeholder - could be calculated from GL entries
+
+        available_balance = budget_amount - actual_expenses
+
+        frappe.response['message'] = {
+            'success': True,
+            'budget_amount': budget_amount,
+            'actual_expenses': actual_expenses,
+            'available_balance': available_balance
+        }
+
+    except Exception as e:
+        frappe.response['message'] = {
+            'success': False,
+            'message': 'Error fetching account balance: ' + str(e)
+        }
+
 def get_budget_accounts(budget, exclude_account=None):
     """Get accounts within a budget, optionally excluding one account"""
     try:
@@ -343,6 +389,36 @@ def validate_budget_transfer(budget, expense_account, amount):
             'message': 'Error validating budget transfer: ' + str(e)
         }
 
+def is_multi_transfer_mode(doc_name):
+    """Check if Budget Request uses multi-transfer mode"""
+    try:
+        budget_request = frappe.get_doc("Budget Request", doc_name)
+        return len(budget_request.transfer_items) > 0
+    except Exception:
+        return False
+
+def get_transfer_data(doc_name):
+    """Get transfer data for both single and multi-transfer modes"""
+    budget_request = frappe.get_doc("Budget Request", doc_name)
+
+    if is_multi_transfer_mode(doc_name):
+        # Multi-transfer mode: return list of transfer items
+        transfers = []
+        for item in budget_request.transfer_items:
+            transfers.append({
+                'from_account': item.from_account,
+                'to_account': item.to_account,
+                'amount_requested': item.amount_requested
+            })
+        return transfers
+    else:
+        # Single-transfer mode: return single transfer as list for consistency
+        return [{
+            'from_account': budget_request.expense_account,
+            'to_account': budget_request.to_expense_account,
+            'amount_requested': budget_request.amount_requested
+        }]
+
 def process_approval_with_amendment(doc_name, virement_type, budget, target_budget, expense_account, to_expense_account, amount_requested):
     """Process budget request approval with automatic budget amendment"""
     try:
@@ -384,20 +460,25 @@ def process_approval_with_amendment(doc_name, virement_type, budget, target_budg
             }
             return
 
-        # STEP 2: Process budget amendment (this will cancel budgets and create amendments)
-        if virement_type == "Intra-Budget":
-            amendment_result = process_intra_budget_amendment(budget, expense_account, to_expense_account, amount_requested)
-        elif virement_type == "Inter-Budget":
-            if not target_budget:
+        # STEP 2: Determine transfer mode and process accordingly
+        if is_multi_transfer_mode(doc_name):
+            # Multi-transfer mode: process all transfer items
+            amendment_result = process_multi_transfer_amendment(doc_name, virement_type, budget, target_budget)
+        else:
+            # Single-transfer mode: use existing logic
+            if virement_type == "Intra-Budget":
+                amendment_result = process_intra_budget_amendment(budget, expense_account, to_expense_account, amount_requested)
+            elif virement_type == "Inter-Budget":
+                if not target_budget:
+                    frappe.response['message'] = {
+                        'success': False,
+                        'message': 'Target budget is required for Inter-Budget transfers'
+                    }
+                    return
+                amendment_result = process_inter_budget_amendment(budget, target_budget, expense_account, to_expense_account, amount_requested)
+            else:
                 frappe.response['message'] = {
                     'success': False,
-                    'message': 'Target budget is required for Inter-Budget transfers'
-                }
-                return
-            amendment_result = process_inter_budget_amendment(budget, target_budget, expense_account, to_expense_account, amount_requested)
-        else:
-            frappe.response['message'] = {
-                'success': False,
                 'message': 'Invalid virement type: ' + str(virement_type)
             }
             return
@@ -651,6 +732,74 @@ def process_inter_budget_amendment(source_budget_name, target_budget_name, from_
 
     except Exception as e:
         raise Exception('Inter-Budget amendment error: ' + str(e))
+
+def process_multi_transfer_amendment(doc_name, virement_type, budget, target_budget):
+    """Process amendment for multiple transfers"""
+    try:
+        # Get all transfer items from Budget Request
+        transfers = get_transfer_data(doc_name)
+
+        if not transfers:
+            raise Exception("No transfer items found in Budget Request")
+
+        # Group transfers by budget type
+        intra_transfers = []
+        inter_transfers = []
+
+        for transfer in transfers:
+            # Determine if this is intra or inter budget transfer
+            # For now, assume all transfers follow the same virement_type
+            # In future, could determine per transfer based on account budgets
+            if virement_type == "Intra-Budget":
+                intra_transfers.append(transfer)
+            else:
+                inter_transfers.append(transfer)
+
+        # Process intra-budget transfers
+        intra_results = []
+        for transfer in intra_transfers:
+            result = process_intra_budget_amendment(
+                budget,
+                transfer['from_account'],
+                transfer['to_account'],
+                transfer['amount_requested']
+            )
+            intra_results.append(result)
+
+        # Process inter-budget transfers
+        inter_results = []
+        for transfer in inter_transfers:
+            if not target_budget:
+                raise Exception('Target budget is required for Inter-Budget transfers')
+            result = process_inter_budget_amendment(
+                budget,
+                target_budget,
+                transfer['from_account'],
+                transfer['to_account'],
+                transfer['amount_requested']
+            )
+            inter_results.append(result)
+
+        # Combine results
+        all_results = intra_results + inter_results
+        total_amount = sum(transfer['amount_requested'] for transfer in transfers)
+
+        # Create summary
+        transfer_summaries = []
+        for transfer in transfers:
+            transfer_summaries.append(f"{transfer['amount_requested']} from {transfer['from_account']} to {transfer['to_account']}")
+
+        return {
+            'success': True,
+            'amended_budget_names': [result.get('amended_budget_name', '') for result in all_results if result.get('success')],
+            'original_budget_name': budget + (f', {target_budget}' if target_budget else ''),
+            'summary': f'Multi-transfer: {"; ".join(transfer_summaries)} (Total: {total_amount})',
+            'transfer_count': len(transfers),
+            'individual_results': all_results
+        }
+
+    except Exception as e:
+        raise Exception('Multi-transfer amendment error: ' + str(e))
 
 def generate_amended_budget_name(original_name):
     """Generate unique amended budget name"""
