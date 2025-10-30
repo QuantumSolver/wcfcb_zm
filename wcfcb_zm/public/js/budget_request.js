@@ -13,6 +13,11 @@ frappe.ui.form.on('Budget Request', {
 
         // Add View Summary button for approved requests
         add_view_summary_button(frm);
+
+        // Add accordion-style progressive summary (for multi-transfer mode)
+        if (is_multi_transfer_mode(frm)) {
+            add_accordion_progressive_summary(frm);
+        }
     },
 
     onload_post_render: function(frm) {
@@ -286,6 +291,8 @@ frappe.ui.form.on('Budget Request Item', {
             frappe.model.set_value(cdt, cdn, 'from_available', 0);
             frappe.model.set_value(cdt, cdn, 'from_remaining', 0);
         }
+        // Refresh inline summary if visible
+        refresh_inline_summary_if_visible(frm);
     },
 
     to_account: function(frm, cdt, cdn) {
@@ -308,23 +315,35 @@ frappe.ui.form.on('Budget Request Item', {
             frappe.model.set_value(cdt, cdn, 'to_available', 0);
             frappe.model.set_value(cdt, cdn, 'to_new_amount', 0);
         }
+        // Refresh inline summary if visible
+        refresh_inline_summary_if_visible(frm);
     },
 
     amount_requested: function(frm, cdt, cdn) {
         calculate_transfer_item_balances(frm, cdt, cdn);
         // Check threshold for multi-transfer mode
         handle_threshold_validation(frm);
+        // Refresh inline summary if visible
+        refresh_inline_summary_if_visible(frm);
     },
 
     transfer_items_remove: function(frm) {
         // Recalculate totals when item is removed
         calculate_total_transfer_amount(frm);
+        // Refresh inline summary if visible
+        refresh_inline_summary_if_visible(frm);
     },
 
     transfer_items_add: function(frm) {
         // Set up filters for new row
         setup_transfer_item_filters(frm);
         calculate_total_transfer_amount(frm);
+        // Add accordion summary if not present
+        if (!frm._accordion_summary_visible) {
+            add_accordion_progressive_summary(frm);
+        }
+        // Refresh inline summary if visible
+        refresh_inline_summary_if_visible(frm);
     }
 });
 
@@ -412,23 +431,32 @@ function calculate_total_transfer_amount(frm) {
 
     // Update display or validation as needed
     frm.refresh_field('transfer_items');
+
+    // Refresh accordion summary if visible
+    refresh_inline_summary_if_visible(frm);
 }
 
 function setup_transfer_item_filters(frm) {
-    // Set up filters for from_account field
-    frm.set_query('from_account', 'transfer_items', function() {
+    // Set up filters for from_account field with real-time progressive balance calculation
+    frm.set_query('from_account', 'transfer_items', function(_, cdt, cdn) {
         if (!frm.doc.budget) {
             return { filters: { 'name': 'no-match' } }; // Return empty result if no budget
         }
+
+        // Calculate progressive balances up to current row
+        let current_row_idx = get_row_index(frm, cdt, cdn);
+        let progressive_balances = calculate_client_side_progressive_balances(frm, current_row_idx);
+
         return {
-            query: 'wcfcb_zm.api.budget_request.get_budget_accounts',
+            query: 'wcfcb_zm.api.budget_request.get_budget_accounts_with_progressive',
             filters: {
-                'budget': frm.doc.budget
+                'budget': frm.doc.budget,
+                'progressive_balances': JSON.stringify(progressive_balances)
             }
         };
     });
 
-    // Set up filters for to_account field
+    // Set up filters for to_account field with real-time progressive balance calculation
     frm.set_query('to_account', 'transfer_items', function(_, cdt, cdn) {
         let row = locals[cdt][cdn];
         let target_budget = frm.doc.virement_type === 'Inter-Budget' ? frm.doc.target_budget : frm.doc.budget;
@@ -437,11 +465,16 @@ function setup_transfer_item_filters(frm) {
             return { filters: { 'name': 'no-match' } }; // Return empty result if no target budget
         }
 
+        // Calculate progressive balances up to current row
+        let current_row_idx = get_row_index(frm, cdt, cdn);
+        let progressive_balances = calculate_client_side_progressive_balances(frm, current_row_idx, target_budget);
+
         return {
-            query: 'wcfcb_zm.api.budget_request.get_budget_accounts',
+            query: 'wcfcb_zm.api.budget_request.get_budget_accounts_with_progressive',
             filters: {
                 'budget': target_budget,
-                'exclude_account': frm.doc.virement_type === 'Intra-Budget' ? row.from_account : null
+                'exclude_account': frm.doc.virement_type === 'Intra-Budget' ? row.from_account : null,
+                'progressive_balances': JSON.stringify(progressive_balances)
             }
         };
     });
@@ -449,6 +482,342 @@ function setup_transfer_item_filters(frm) {
 
 function is_multi_transfer_mode(frm) {
     return frm.doc.transfer_items && frm.doc.transfer_items.length > 0;
+}
+
+function get_row_index(frm, cdt, cdn) {
+    // Find the index of the current row being edited
+    if (!frm.doc.transfer_items) return 0;
+
+    for (let i = 0; i < frm.doc.transfer_items.length; i++) {
+        if (frm.doc.transfer_items[i].name === cdn) {
+            return i;
+        }
+    }
+    return frm.doc.transfer_items.length; // If not found, assume it's a new row
+}
+
+function calculate_client_side_progressive_balances(frm, up_to_row_idx, target_budget = null) {
+    // Calculate progressive balances based on transfer items up to specified row
+    let progressive_balances = {};
+
+    if (!frm.doc.transfer_items || frm.doc.transfer_items.length === 0) {
+        return progressive_balances;
+    }
+
+    // Process transfers up to (but not including) the current row
+    for (let i = 0; i < Math.min(up_to_row_idx, frm.doc.transfer_items.length); i++) {
+        let item = frm.doc.transfer_items[i];
+
+        if (!item.from_account || !item.to_account || !item.amount_requested) {
+            continue; // Skip incomplete rows
+        }
+
+        let amount = flt(item.amount_requested);
+
+        // Determine which budget each account belongs to
+        let from_budget = frm.doc.budget;
+        let to_budget = frm.doc.virement_type === 'Inter-Budget' ? frm.doc.target_budget : frm.doc.budget;
+
+        // Create unique keys for account-budget combinations
+        let from_key = `${item.from_account}|${from_budget}`;
+        let to_key = `${item.to_account}|${to_budget}`;
+
+        // Initialize if not exists
+        if (!progressive_balances[from_key]) {
+            progressive_balances[from_key] = 0;
+        }
+        if (!progressive_balances[to_key]) {
+            progressive_balances[to_key] = 0;
+        }
+
+        // Apply transfer
+        progressive_balances[from_key] -= amount;
+        progressive_balances[to_key] += amount;
+    }
+
+    // Filter balances for the target budget if specified
+    if (target_budget) {
+        let filtered_balances = {};
+        for (let key in progressive_balances) {
+            if (key.endsWith(`|${target_budget}`)) {
+                filtered_balances[key] = progressive_balances[key];
+            }
+        }
+        return filtered_balances;
+    }
+
+    return progressive_balances;
+}
+
+function add_accordion_progressive_summary(frm) {
+    // Add accordion-style progressive summary after transfer items table
+    setTimeout(() => {
+        create_accordion_progressive_summary(frm);
+    }, 500); // Delay to ensure DOM is ready
+}
+
+function create_accordion_progressive_summary(frm) {
+    // Find the transfer items section
+    let transfer_items_section = frm.get_field('transfer_items');
+    if (!transfer_items_section || !transfer_items_section.$wrapper) {
+        return;
+    }
+
+    // Remove existing summary if present
+    transfer_items_section.$wrapper.find('.accordion-progressive-summary').remove();
+
+    // Create accordion-style summary
+    let summary_html = generate_accordion_progressive_summary_html(frm);
+
+    let accordion_div = $(`
+        <div class="accordion-progressive-summary" style="margin-top: 20px;">
+            <div class="card" style="border: 1px solid #dee2e6; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                <div class="card-header" style="background: linear-gradient(135deg, #347FB6 0%, #ED8643 100%); border-radius: 8px 8px 0 0; cursor: pointer;"
+                     onclick="$(this).next('.card-body').slideToggle(); $(this).find('.toggle-icon').toggleClass('fa-chevron-down fa-chevron-up');">
+                    <h6 style="margin: 0; color: white; font-weight: 600; display: flex; align-items: center; justify-content: space-between;">
+                        <span>
+                            <i class="fa fa-chart-line" style="margin-right: 8px;"></i>
+                            Transfer Summary
+                            <small style="opacity: 0.8; font-weight: normal; margin-left: 10px;">
+                                (Updates automatically as you add transfers)
+                            </small>
+                        </span>
+                        <i class="fa fa-chevron-down toggle-icon" style="transition: transform 0.3s ease;"></i>
+                    </h6>
+                </div>
+                <div class="card-body" style="padding: 20px; background-color: #f8f9fa; border-radius: 0 0 8px 8px; display: none;">
+                    <div class="summary-content">
+                        ${summary_html}
+                    </div>
+                </div>
+            </div>
+        </div>
+    `);
+
+    // Append after the transfer items table
+    transfer_items_section.$wrapper.append(accordion_div);
+
+    // Mark as visible for refresh functionality
+    frm._accordion_summary_visible = true;
+}
+
+function generate_accordion_progressive_summary_html(frm) {
+    // Generate HTML for accordion progressive summary
+    if (!frm.doc.transfer_items || frm.doc.transfer_items.length === 0) {
+        return `
+            <div style="text-align: center; padding: 30px; color: #6c757d;">
+                <i class="fa fa-info-circle" style="font-size: 24px; margin-bottom: 10px; opacity: 0.5;"></i>
+                <p style="margin: 0; font-style: italic;">No transfers added yet. Add transfer items above to see the progressive summary.</p>
+            </div>
+        `;
+    }
+
+    // Calculate progressive balances for all complete transfers
+    let account_progressions = {};
+    let running_balances = {};
+    let transfer_sequence = [];
+
+    // Process each transfer to build progression
+    for (let i = 0; i < frm.doc.transfer_items.length; i++) {
+        let item = frm.doc.transfer_items[i];
+
+        if (!item.from_account || !item.to_account || !item.amount_requested) {
+            continue; // Skip incomplete rows
+        }
+
+        let amount = flt(item.amount_requested);
+        let from_acc = item.from_account;
+        let to_acc = item.to_account;
+
+        // Initialize account progressions if not exists
+        if (!account_progressions[from_acc]) {
+            account_progressions[from_acc] = [];
+            running_balances[from_acc] = 0;
+        }
+        if (!account_progressions[to_acc]) {
+            account_progressions[to_acc] = [];
+            running_balances[to_acc] = 0;
+        }
+
+        // Record the progression
+        let from_before = running_balances[from_acc];
+        let to_before = running_balances[to_acc];
+
+        running_balances[from_acc] -= amount;
+        running_balances[to_acc] += amount;
+
+        account_progressions[from_acc].push({
+            transfer_idx: i + 1,
+            before: from_before,
+            after: running_balances[from_acc],
+            change: -amount,
+            type: 'from'
+        });
+
+        account_progressions[to_acc].push({
+            transfer_idx: i + 1,
+            before: to_before,
+            after: running_balances[to_acc],
+            change: amount,
+            type: 'to'
+        });
+
+        // Add to transfer sequence for step-by-step view
+        transfer_sequence.push({
+            idx: i + 1,
+            from_account: from_acc,
+            to_account: to_acc,
+            amount: amount,
+            from_before: from_before,
+            from_after: running_balances[from_acc],
+            to_before: to_before,
+            to_after: running_balances[to_acc]
+        });
+    }
+
+    let html = '<div class="row">';
+
+    // Left column: Step-by-step transfer sequence
+    html += `
+        <div class="col-md-6">
+            <h6 style="color: #495057; margin-bottom: 15px; font-weight: 600;">
+                <i class="fa fa-list-ol" style="margin-right: 5px; color: #007bff;"></i>
+                Transfer Sequence
+            </h6>
+    `;
+
+    for (let transfer of transfer_sequence) {
+        html += `
+            <div style="margin-bottom: 15px; padding: 15px; border: 1px solid #e9ecef; border-radius: 6px; background: white;">
+                <div style="font-weight: 600; color: #495057; margin-bottom: 10px; font-size: 14px;">
+                    Transfer ${transfer.idx}: K ${transfer.amount.toLocaleString()}
+                </div>
+
+                <div style="margin-bottom: 8px;">
+                    <div style="color: #dc3545; font-weight: 500; margin-bottom: 2px;">FROM: ${transfer.from_account}</div>
+                    <div style="font-weight: bold; color: #dc3545; padding-left: 10px;">
+                        ${transfer.from_before === 0 ?
+                            `K -${Math.abs(transfer.amount).toLocaleString()}` :
+                            `K ${transfer.from_before.toLocaleString()} → K ${transfer.from_after.toLocaleString()}`
+                        }
+                    </div>
+                </div>
+
+                <div>
+                    <div style="color: #28a745; font-weight: 500; margin-bottom: 2px;">TO: ${transfer.to_account}</div>
+                    <div style="font-weight: bold; color: #28a745; padding-left: 10px;">
+                        ${transfer.to_before === 0 ?
+                            `K ${transfer.amount.toLocaleString()}` :
+                            `K ${transfer.to_before.toLocaleString()} → K ${transfer.to_after.toLocaleString()}`
+                        }
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    html += '</div>';
+
+    // Right column: Account impact summary
+    html += `
+        <div class="col-md-6">
+            <h6 style="color: #495057; margin-bottom: 15px; font-weight: 600;">
+                <i class="fa fa-chart-bar" style="margin-right: 5px; color: #28a745;"></i>
+                Account Impact Summary
+            </h6>
+    `;
+
+    for (let account in account_progressions) {
+        let progressions = account_progressions[account];
+        let final_change = running_balances[account];
+
+        html += `
+            <div style="margin-bottom: 12px; padding: 12px; border: 1px solid #e9ecef; border-radius: 6px; background: white;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <strong style="color: #495057; font-size: 14px;">${account}</strong>
+                    <span class="badge ${final_change >= 0 ? 'badge-success' : 'badge-danger'}" style="font-size: 11px;">
+                        ${final_change >= 0 ? '+' : ''}K ${Math.abs(final_change).toLocaleString()}
+                    </span>
+                </div>
+                <div style="font-size: 12px; color: #6c757d;">
+        `;
+
+        for (let prog of progressions) {
+            let change_text = prog.change >= 0 ? `+K ${prog.change.toLocaleString()}` : `-K ${Math.abs(prog.change).toLocaleString()}`;
+            let arrow_color = prog.type === 'from' ? '#dc3545' : '#28a745';
+            let icon = prog.type === 'from' ? 'fa-arrow-up' : 'fa-arrow-down';
+
+            html += `
+                <div style="margin-bottom: 2px; display: flex; justify-content: space-between;">
+                    <span>Transfer ${prog.transfer_idx}:</span>
+                    <span style="color: ${arrow_color};">
+                        <i class="fa ${icon}" style="font-size: 10px; margin-right: 3px;"></i>
+                        ${change_text}
+                    </span>
+                </div>
+            `;
+        }
+
+        html += `
+                </div>
+            </div>
+        `;
+    }
+
+    html += '</div></div>';
+
+    // Add total summary footer
+    let total_amount = frm.doc.transfer_items.reduce((sum, item) => sum + flt(item.amount_requested || 0), 0);
+    let complete_transfers = transfer_sequence.length;
+    let total_transfers = frm.doc.transfer_items.length;
+
+    html += `
+        <div style="margin-top: 25px; padding: 20px; background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); border-radius: 8px; border: 1px solid #dee2e6;">
+            <div class="row text-center">
+                <div class="col-md-4">
+                    <div style="font-size: 28px; font-weight: bold; color: #007bff; margin-bottom: 5px;">
+                        K ${total_amount.toLocaleString()}
+                    </div>
+                    <div style="font-size: 13px; color: #6c757d; text-transform: uppercase; font-weight: 500;">
+                        TOTAL AMOUNT
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div style="font-size: 28px; font-weight: bold; color: ${complete_transfers === total_transfers ? '#28a745' : '#ffc107'}; margin-bottom: 5px;">
+                        ${complete_transfers}/${total_transfers}
+                    </div>
+                    <div style="font-size: 13px; color: #6c757d; text-transform: uppercase; font-weight: 500;">
+                        COMPLETE TRANSFERS
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div style="font-size: 28px; font-weight: bold; color: #6f42c1; margin-bottom: 5px;">
+                        ${Object.keys(account_progressions).length}
+                    </div>
+                    <div style="font-size: 13px; color: #6c757d; text-transform: uppercase; font-weight: 500;">
+                        AFFECTED ACCOUNTS
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    return html;
+}
+
+function refresh_inline_summary_if_visible(frm) {
+    // Refresh the accordion progressive summary if it's currently visible
+    if (frm._accordion_summary_visible) {
+        let transfer_items_section = frm.get_field('transfer_items');
+        if (transfer_items_section && transfer_items_section.$wrapper) {
+            let summary_wrapper = transfer_items_section.$wrapper.find('.accordion-progressive-summary .summary-content');
+            if (summary_wrapper.length > 0) {
+                // Update the summary content
+                let new_html = generate_accordion_progressive_summary_html(frm);
+                summary_wrapper.html(new_html);
+            }
+        }
+    }
 }
 
 function generate_transfer_details_html(frm) {

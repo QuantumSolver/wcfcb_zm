@@ -160,7 +160,7 @@ def get_account_balance_from_budget(budget_name, account):
 
 @frappe.whitelist()
 def get_budget_accounts(doctype=None, txt=None, searchfield=None, start=None, page_len=None, filters=None):
-    """Get accounts within a budget, optionally excluding one account - compatible with Frappe search widget"""
+    """Get accounts within a budget with progressive balance information - compatible with Frappe search widget"""
     try:
         # Parse filters if it's a string (from search widget)
         if isinstance(filters, str):
@@ -172,57 +172,164 @@ def get_budget_accounts(doctype=None, txt=None, searchfield=None, start=None, pa
 
         budget = filters.get('budget')
         exclude_account = filters.get('exclude_account')
+        doc_name = filters.get('doc_name')  # Budget Request name for progressive calculation
+
+        # Base query to get accounts with original amounts
+        base_query = """
+            SELECT
+                ba.account as value,
+                acc.account_name,
+                ba.budget_amount as original_amount
+            FROM
+                `tabBudget Account` ba
+            INNER JOIN
+                `tabAccount` acc ON ba.account = acc.name
+            WHERE
+                ba.parent = %(budget)s
+                {exclude_clause}
+                AND (%(txt)s = '' OR acc.account_name LIKE %(txt)s OR ba.account LIKE %(txt)s)
+            ORDER BY
+                acc.account_name
+            LIMIT %(start)s, %(page_len)s
+        """
+
+        exclude_clause = "AND ba.account != %(exclude_account)s" if exclude_account else ""
+        query = base_query.format(exclude_clause=exclude_clause)
+
+        params = {
+            'budget': budget,
+            'txt': f'%{txt}%' if txt else '',
+            'start': start or 0,
+            'page_len': page_len or 20
+        }
 
         if exclude_account:
-            accounts = frappe.db.sql("""
-                SELECT
-                    ba.account as value,
-                    CONCAT(acc.account_name, ' (', ba.budget_amount, ')') as description
-                FROM
-                    `tabBudget Account` ba
-                INNER JOIN
-                    `tabAccount` acc ON ba.account = acc.name
-                WHERE
-                    ba.parent = %(budget)s
-                    AND ba.account != %(exclude_account)s
-                    AND (%(txt)s = '' OR acc.account_name LIKE %(txt)s OR ba.account LIKE %(txt)s)
-                ORDER BY
-                    acc.account_name
-                LIMIT %(start)s, %(page_len)s
-            """, {
-                'budget': budget,
-                'exclude_account': exclude_account,
-                'txt': f'%{txt}%' if txt else '',
-                'start': start or 0,
-                'page_len': page_len or 20
-            }, as_dict=True)
-        else:
-            accounts = frappe.db.sql("""
-                SELECT
-                    ba.account as value,
-                    CONCAT(acc.account_name, ' (', ba.budget_amount, ')') as description
-                FROM
-                    `tabBudget Account` ba
-                INNER JOIN
-                    `tabAccount` acc ON ba.account = acc.name
-                WHERE
-                    ba.parent = %(budget)s
-                    AND (%(txt)s = '' OR acc.account_name LIKE %(txt)s OR ba.account LIKE %(txt)s)
-                ORDER BY
-                    acc.account_name
-                LIMIT %(start)s, %(page_len)s
-            """, {
-                'budget': budget,
-                'txt': f'%{txt}%' if txt else '',
-                'start': start or 0,
-                'page_len': page_len or 20
-            }, as_dict=True)
+            params['exclude_account'] = exclude_account
 
-        # Return in the format expected by search widget
-        return [[account.value, account.description] for account in accounts]
+        accounts = frappe.db.sql(query, params, as_dict=True)
+
+        # Calculate progressive balances if doc_name is provided
+        progressive_balances = {}
+        if doc_name:
+            try:
+                budget_request = frappe.get_doc("Budget Request", doc_name)
+                if budget_request.transfer_items:
+                    # Initialize with original amounts
+                    running_balances = {}
+                    for account in accounts:
+                        running_balances[account.value] = account.original_amount
+
+                    # Apply transfers progressively
+                    for item in budget_request.transfer_items:
+                        if item.from_account in running_balances:
+                            running_balances[item.from_account] -= (item.amount_requested or 0)
+                        if item.to_account in running_balances:
+                            running_balances[item.to_account] += (item.amount_requested or 0)
+
+                    progressive_balances = running_balances
+            except:
+                pass  # If error, just use original amounts
+
+        # Format results with progressive balance information
+        formatted_results = []
+        for account in accounts:
+            original_amount = account.original_amount
+            current_amount = progressive_balances.get(account.value, original_amount)
+
+            if doc_name and account.value in progressive_balances and current_amount != original_amount:
+                # Show progressive balance: "Account Name (K Original → K Current)"
+                description = f"{account.account_name} (K {original_amount:,.0f} → K {current_amount:,.0f})"
+            else:
+                # Show original balance: "Account Name (K Amount)"
+                description = f"{account.account_name} (K {original_amount:,.0f})"
+
+            formatted_results.append([account.value, description])
+
+        return formatted_results
 
     except Exception as e:
         frappe.log_error(f"Error in get_budget_accounts: {str(e)}")
+        return []
+
+@frappe.whitelist()
+def get_budget_accounts_with_progressive(doctype=None, txt=None, searchfield=None, start=None, page_len=None, filters=None):
+    """Get accounts within a budget with real-time progressive balance information from client-side calculations"""
+    try:
+        # Parse filters if it's a string (from search widget)
+        if isinstance(filters, str):
+            import json
+            filters = json.loads(filters)
+
+        if not filters or not filters.get('budget'):
+            return []
+
+        budget = filters.get('budget')
+        exclude_account = filters.get('exclude_account')
+        progressive_balances_json = filters.get('progressive_balances', '{}')
+
+        # Parse progressive balances from client
+        try:
+            progressive_balances = json.loads(progressive_balances_json) if progressive_balances_json else {}
+        except:
+            progressive_balances = {}
+
+        # Base query to get accounts with original amounts
+        base_query = """
+            SELECT
+                ba.account as value,
+                acc.account_name,
+                ba.budget_amount as original_amount
+            FROM
+                `tabBudget Account` ba
+            INNER JOIN
+                `tabAccount` acc ON ba.account = acc.name
+            WHERE
+                ba.parent = %(budget)s
+                {exclude_clause}
+                AND (%(txt)s = '' OR acc.account_name LIKE %(txt)s OR ba.account LIKE %(txt)s)
+            ORDER BY
+                acc.account_name
+            LIMIT %(start)s, %(page_len)s
+        """
+
+        exclude_clause = "AND ba.account != %(exclude_account)s" if exclude_account else ""
+        query = base_query.format(exclude_clause=exclude_clause)
+
+        params = {
+            'budget': budget,
+            'txt': f'%{txt}%' if txt else '',
+            'start': start or 0,
+            'page_len': page_len or 20
+        }
+
+        if exclude_account:
+            params['exclude_account'] = exclude_account
+
+        accounts = frappe.db.sql(query, params, as_dict=True)
+
+        # Format results with progressive balance information
+        formatted_results = []
+        for account in accounts:
+            original_amount = account.original_amount
+
+            # Look for progressive balance using account|budget key format
+            progressive_key = f"{account.value}|{budget}"
+            progressive_change = progressive_balances.get(progressive_key, 0)
+            current_amount = original_amount + progressive_change
+
+            if progressive_change != 0:
+                # Show progressive balance: "Account Name (K Original → K Current)"
+                description = f"{account.account_name} (K {original_amount:,.0f} → K {current_amount:,.0f})"
+            else:
+                # Show original balance: "Account Name (K Amount)"
+                description = f"{account.account_name} (K {original_amount:,.0f})"
+
+            formatted_results.append([account.value, description])
+
+        return formatted_results
+
+    except Exception as e:
+        frappe.log_error(f"Error in get_budget_accounts_with_progressive: {str(e)}")
         return []
 
 def get_target_budgets(virement_type, source_budget=None):
@@ -759,7 +866,7 @@ def process_inter_budget_amendment(source_budget_name, target_budget_name, from_
         raise Exception('Inter-Budget amendment error: ' + str(e))
 
 def process_multi_transfer_amendment(doc_name, virement_type, budget, target_budget):
-    """Process amendment for multiple transfers"""
+    """Process amendment for multiple transfers using batch processing"""
     try:
         # Get all transfer items from Budget Request
         transfers = get_transfer_data(doc_name)
@@ -780,28 +887,24 @@ def process_multi_transfer_amendment(doc_name, virement_type, budget, target_bud
             else:
                 inter_transfers.append(transfer)
 
-        # Process intra-budget transfers
+        # Process intra-budget transfers AS A BATCH
         intra_results = []
-        for transfer in intra_transfers:
-            result = process_intra_budget_amendment(
+        if intra_transfers:
+            result = process_intra_budget_amendment_batch(
                 budget,
-                transfer['from_account'],
-                transfer['to_account'],
-                transfer['amount_requested']
+                intra_transfers
             )
             intra_results.append(result)
 
-        # Process inter-budget transfers
+        # Process inter-budget transfers AS A BATCH
         inter_results = []
-        for transfer in inter_transfers:
+        if inter_transfers:
             if not target_budget:
                 raise Exception('Target budget is required for Inter-Budget transfers')
-            result = process_inter_budget_amendment(
+            result = process_inter_budget_amendment_batch(
                 budget,
                 target_budget,
-                transfer['from_account'],
-                transfer['to_account'],
-                transfer['amount_requested']
+                inter_transfers
             )
             inter_results.append(result)
 
@@ -818,13 +921,171 @@ def process_multi_transfer_amendment(doc_name, virement_type, budget, target_bud
             'success': True,
             'amended_budget_names': [result.get('amended_budget_name', '') for result in all_results if result.get('success')],
             'original_budget_name': budget + (f', {target_budget}' if target_budget else ''),
-            'summary': f'Multi-transfer: {"; ".join(transfer_summaries)} (Total: {total_amount})',
+            'summary': f'Multi-transfer batch: {"; ".join(transfer_summaries)} (Total: {total_amount})',
             'transfer_count': len(transfers),
             'individual_results': all_results
         }
 
     except Exception as e:
         raise Exception('Multi-transfer amendment error: ' + str(e))
+
+def process_intra_budget_amendment_batch(budget_name, transfers):
+    """Process amendment for multiple Intra-Budget transfers in one batch"""
+    try:
+        # Get budget data (allow cancelled budgets for re-amendment)
+        budget_data = frappe.db.sql("""
+            SELECT * FROM `tabBudget`
+            WHERE name = %s AND docstatus IN (1, 2)
+        """, (budget_name,), as_dict=True)
+
+        if not budget_data:
+            raise Exception("Budget not found: " + budget_name)
+
+        budget = budget_data[0]
+
+        # Get budget accounts
+        accounts = frappe.db.sql("""
+            SELECT account, budget_amount FROM `tabBudget Account` WHERE parent = %s
+        """, (budget_name,), as_dict=True)
+
+        # Calculate TOTAL adjustments per account
+        adjustments = {}  # {account: total_net_adjustment}
+
+        for transfer in transfers:
+            from_account = transfer['from_account']
+            to_account = transfer['to_account']
+            amount = transfer['amount_requested']
+
+            # Subtract from source account
+            if from_account not in adjustments:
+                adjustments[from_account] = 0
+            adjustments[from_account] -= amount
+
+            # Add to target account
+            if to_account not in adjustments:
+                adjustments[to_account] = 0
+            adjustments[to_account] += amount
+
+        # Validate all FROM accounts exist
+        for transfer in transfers:
+            from_account = transfer['from_account']
+            from_account_exists = any(account['account'] == from_account for account in accounts)
+            if not from_account_exists:
+                raise Exception("FROM account not found in budget: " + from_account)
+
+        # Cancel existing budget ONCE
+        frappe.db.set_value("Budget", budget_name, "docstatus", 2)
+
+        # Create amended budget ONCE with ALL adjustments
+        amended_name = generate_amended_budget_name(budget_name)
+        amended_budget = create_amended_budget(budget, amended_name, budget_name)
+        copy_budget_accounts_with_multiple_adjustments(accounts, amended_budget, adjustments, add_missing=True)
+        amended_budget.insert()
+
+        # Create summary
+        transfer_summaries = []
+        for transfer in transfers:
+            transfer_summaries.append(f"{transfer['amount_requested']} from {transfer['from_account']} to {transfer['to_account']}")
+
+        return {
+            'success': True,
+            'amended_budget_name': amended_name,
+            'original_budget_name': budget_name,
+            'summary': f'Intra-Budget batch: {"; ".join(transfer_summaries)}'
+        }
+
+    except Exception as e:
+        raise Exception('Intra-Budget batch amendment error: ' + str(e))
+
+def process_inter_budget_amendment_batch(source_budget_name, target_budget_name, transfers):
+    """Process amendment for multiple Inter-Budget transfers in one batch"""
+    try:
+        # Get source and target budget data
+        source_budget_data = frappe.db.sql("""
+            SELECT * FROM `tabBudget`
+            WHERE name = %s AND docstatus IN (1, 2)
+        """, (source_budget_name,), as_dict=True)
+
+        target_budget_data = frappe.db.sql("""
+            SELECT * FROM `tabBudget`
+            WHERE name = %s AND docstatus IN (1, 2)
+        """, (target_budget_name,), as_dict=True)
+
+        if not source_budget_data:
+            raise Exception("Source budget not found: " + source_budget_name)
+        if not target_budget_data:
+            raise Exception("Target budget not found: " + target_budget_name)
+
+        source_budget = source_budget_data[0]
+        target_budget = target_budget_data[0]
+
+        # Get budget accounts
+        source_accounts = frappe.db.sql("""
+            SELECT account, budget_amount FROM `tabBudget Account` WHERE parent = %s
+        """, (source_budget_name,), as_dict=True)
+
+        target_accounts = frappe.db.sql("""
+            SELECT account, budget_amount FROM `tabBudget Account` WHERE parent = %s
+        """, (target_budget_name,), as_dict=True)
+
+        # Calculate TOTAL adjustments per account
+        source_adjustments = {}  # {account: total_amount_to_subtract}
+        target_adjustments = {}  # {account: total_amount_to_add}
+
+        for transfer in transfers:
+            from_account = transfer['from_account']
+            to_account = transfer['to_account']
+            amount = transfer['amount_requested']
+
+            # Accumulate source account adjustments (subtract)
+            if from_account not in source_adjustments:
+                source_adjustments[from_account] = 0
+            source_adjustments[from_account] -= amount
+
+            # Accumulate target account adjustments (add)
+            if to_account not in target_adjustments:
+                target_adjustments[to_account] = 0
+            target_adjustments[to_account] += amount
+
+        # Validate all FROM accounts exist in source budget
+        for transfer in transfers:
+            from_account = transfer['from_account']
+            from_account_exists = any(account['account'] == from_account for account in source_accounts)
+            if not from_account_exists:
+                raise Exception("FROM account not found in source budget: " + from_account)
+
+        # Cancel existing budgets ONCE
+        frappe.db.set_value("Budget", source_budget_name, "docstatus", 2)
+        frappe.db.set_value("Budget", target_budget_name, "docstatus", 2)
+
+        # Create amended budgets ONCE with ALL adjustments
+        amended_source_name = generate_amended_budget_name(source_budget_name)
+        amended_target_name = generate_amended_budget_name(target_budget_name)
+
+        # Create amended source budget
+        amended_source_budget = create_amended_budget(source_budget, amended_source_name, source_budget_name)
+        copy_budget_accounts_with_multiple_adjustments(source_accounts, amended_source_budget, source_adjustments, add_missing=False)
+        amended_source_budget.insert()
+
+        # Create amended target budget
+        amended_target_budget = create_amended_budget(target_budget, amended_target_name, target_budget_name)
+        copy_budget_accounts_with_multiple_adjustments(target_accounts, amended_target_budget, target_adjustments, add_missing=True)
+        amended_target_budget.insert()
+
+        # Create summary
+        transfer_summaries = []
+        for transfer in transfers:
+            transfer_summaries.append(f"{transfer['amount_requested']} from {transfer['from_account']} to {transfer['to_account']}")
+
+        return {
+            'success': True,
+            'amended_budget_name': amended_source_name + ', ' + amended_target_name,
+            'original_budget_name': source_budget_name + ', ' + target_budget_name,
+            'summary': f'Inter-Budget batch: {"; ".join(transfer_summaries)}'
+        }
+
+    except Exception as e:
+        raise Exception('Inter-Budget batch amendment error: ' + str(e))
 
 def generate_amended_budget_name(original_name):
     """Generate unique amended budget name"""
@@ -892,6 +1153,35 @@ def copy_budget_accounts_with_adjustment(accounts, budget_doc, adjust_account, a
         })
 
 
+def copy_budget_accounts_with_multiple_adjustments(accounts, budget_doc, adjustments, add_missing=False):
+    """Copy budget accounts with multiple adjustments applied at once"""
+    processed_accounts = set()
+
+    # Process existing accounts
+    for account in accounts:
+        account_name = account['account']
+        new_amount = float(account['budget_amount'])
+
+        # Apply adjustment if exists
+        if account_name in adjustments:
+            new_amount += adjustments[account_name]
+            processed_accounts.add(account_name)
+
+        budget_doc.append('accounts', {
+            'account': account_name,
+            'budget_amount': new_amount
+        })
+
+    # Add new accounts that didn't exist (for target budgets)
+    if add_missing:
+        for account_name, adjustment in adjustments.items():
+            if account_name not in processed_accounts:
+                budget_doc.append('accounts', {
+                    'account': account_name,
+                    'budget_amount': adjustment
+                })
+
+
 def get_amended_budgets(source_budget, target_budget=None, virement_type=None):
     """Get amended budget names for a Budget Request - safe server method"""
     try:
@@ -941,6 +1231,82 @@ def get_amended_budgets(source_budget, target_budget=None, virement_type=None):
     except Exception as e:
         frappe.log_error(f"Error getting amended budgets: {str(e)}")
         return []
+
+
+def calculate_progressive_transfer_amounts(transfer_items, source_budget, target_budget, virement_type):
+    """Calculate progressive before/after amounts for each transfer showing step-by-step changes"""
+    try:
+        def get_amount(budget_name, account_name):
+            if not budget_name or not account_name:
+                return 0.0
+            row = frappe.db.sql(
+                """
+                SELECT budget_amount FROM `tabBudget Account`
+                WHERE parent = %s AND account = %s
+                """,
+                (budget_name, account_name),
+                as_dict=True,
+            )
+            return float(row[0].budget_amount) if row else 0.0
+
+        # Initialize running balances with original budget amounts
+        running_balances = {}
+
+        # Get all unique accounts involved
+        all_accounts = set()
+        for item in transfer_items:
+            all_accounts.add((item.from_account, source_budget))
+            if virement_type == "Inter-Budget":
+                all_accounts.add((item.to_account, target_budget))
+            else:
+                all_accounts.add((item.to_account, source_budget))
+
+        # Initialize running balances
+        for account, budget in all_accounts:
+            running_balances[(account, budget)] = get_amount(budget, account)
+
+        # Calculate progressive amounts for each transfer
+        progressive_amounts = []
+
+        for item in transfer_items:
+            from_acc = item.from_account
+            to_acc = item.to_account
+            amount = item.amount_requested
+
+            # Determine budget assignments
+            if virement_type == "Inter-Budget":
+                from_budget_key = (from_acc, source_budget)
+                to_budget_key = (to_acc, target_budget)
+            else:
+                from_budget_key = (from_acc, source_budget)
+                to_budget_key = (to_acc, source_budget)
+
+            # Get before amounts (current running balance)
+            from_before = running_balances.get(from_budget_key, 0.0)
+            to_before = running_balances.get(to_budget_key, 0.0)
+
+            # Calculate after amounts
+            from_after = from_before - amount
+            to_after = to_before + amount
+
+            # Update running balances for next iteration
+            running_balances[from_budget_key] = from_after
+            running_balances[to_budget_key] = to_after
+
+            # Store progressive amounts for this transfer
+            progressive_amounts.append({
+                'from_before': from_before,
+                'from_after': from_after,
+                'to_before': to_before,
+                'to_after': to_after
+            })
+
+        return progressive_amounts
+
+    except Exception as e:
+        frappe.log_error(f"Error calculating progressive amounts: {str(e)}")
+        # Return empty progressive amounts on error
+        return [{'from_before': 0, 'from_after': 0, 'to_before': 0, 'to_after': 0} for _ in transfer_items]
 
 
 def get_summary_details(source_budget, target_budget=None, virement_type=None, from_account=None, to_account=None, doc_name=None):
@@ -996,38 +1362,42 @@ def get_summary_details(source_budget, target_budget=None, virement_type=None, f
                 amended_target = latest_amended(target_budget) if target_budget else None
                 result['amended_budgets'] = [n for n in [amended_source, amended_target] if n]
 
-            # Process each transfer item
-            for item in transfer_items:
+            # Calculate progressive amounts for each transfer
+            progressive_amounts = calculate_progressive_transfer_amounts(
+                transfer_items, source_budget, target_budget, virement_type
+            )
+
+            # Process each transfer item with progressive amounts
+            for i, item in enumerate(transfer_items):
                 from_acc = item.from_account
                 to_acc = item.to_account
                 amount = item.amount_requested
+
+                # Get progressive amounts for this transfer
+                prog_amounts = progressive_amounts[i]
 
                 # Determine which budgets to use based on virement type
                 if virement_type == "Inter-Budget":
                     from_budget = source_budget
                     to_budget = target_budget
-                    from_amended = latest_amended(source_budget)
-                    to_amended = latest_amended(target_budget) if target_budget else None
                 else:
                     # Intra-Budget: both accounts in same budget
                     from_budget = source_budget
                     to_budget = source_budget
-                    from_amended = latest_amended(source_budget)
-                    to_amended = from_amended
 
                 transfer_summary = {
                     'amount': amount,
                     'from': {
                         'budget': from_budget,
                         'account': from_acc,
-                        'before': get_amount(from_budget, from_acc),
-                        'after': get_amount(from_amended, from_acc) if from_amended else None
+                        'before': prog_amounts['from_before'],
+                        'after': prog_amounts['from_after']
                     },
                     'to': {
                         'budget': to_budget,
                         'account': to_acc,
-                        'before': get_amount(to_budget, to_acc),
-                        'after': get_amount(to_amended, to_acc) if to_amended else None
+                        'before': prog_amounts['to_before'],
+                        'after': prog_amounts['to_after']
                     }
                 }
                 result['transfer_items'].append(transfer_summary)
