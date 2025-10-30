@@ -273,8 +273,8 @@ def get_budget_accounts_with_progressive(doctype=None, txt=None, searchfield=Non
         except:
             progressive_balances = {}
 
-        # Debug logging
-        frappe.log_error(f"Progressive balances API called - Budget: {budget}, Progressive: {progressive_balances}", "Progressive Balance Debug")
+        # Debug logging (shortened to avoid character limit)
+        # frappe.log_error(f"Progressive API: {budget}", "Progressive Balance Debug")
 
         # Base query to get accounts with original amounts
         base_query = """
@@ -320,20 +320,28 @@ def get_budget_accounts_with_progressive(doctype=None, txt=None, searchfield=Non
             progressive_change = progressive_balances.get(progressive_key, 0)
             current_amount = original_amount + progressive_change
 
-            if progressive_change != 0:
-                # Show progressive balance: "Account Name (K Original → K Current)"
-                description = f"{account.account_name} (K {original_amount:,.0f} → K {current_amount:,.0f})"
-            else:
-                # Show original balance: "Account Name (K Amount)"
-                description = f"{account.account_name} (K {original_amount:,.0f})"
+            # Always show just the final amount (current amount after progressive changes)
+            description = f"{account.account_name} (K {current_amount:,.0f})"
 
             formatted_results.append([account.value, description])
 
         return formatted_results
 
     except Exception as e:
-        frappe.log_error(f"Error in get_budget_accounts_with_progressive: {str(e)}")
+        # frappe.log_error(f"Error in progressive balances API")
         return []
+
+@frappe.whitelist()
+def get_amount(budget, account):
+    """Get the current amount for an account in a budget"""
+    try:
+        budget_account = frappe.get_value('Budget Account',
+            {'parent': budget, 'account': account},
+            'budget_amount')
+        return budget_account or 0
+    except Exception as e:
+        frappe.log_error(f"Error getting amount for {account} in {budget}: {str(e)}")
+        return 0
 
 def get_target_budgets(virement_type, source_budget=None):
     """Get target budgets based on virement type and source budget"""

@@ -14,16 +14,20 @@ frappe.ui.form.on('Budget Request', {
         // Add View Summary button for approved requests
         add_view_summary_button(frm);
 
+        // Initialize modern card-based transfer items interface for all document states
+        // But only allow editing for draft documents
+        initialize_modern_transfer_interface(frm);
+
+        // Ensure cards interface is maintained on refresh
+        setTimeout(() => {
+            if ($('.modern-transfer-cards-container').length === 0) {
+                initialize_modern_transfer_interface(frm);
+            }
+        }, 100);
+
         // Add accordion-style progressive summary (for multi-transfer mode)
         if (is_multi_transfer_mode(frm)) {
             add_accordion_progressive_summary(frm);
-        }
-
-        // Add test button for debugging progressive balances
-        if (frm.doc.docstatus === 0) {
-            frm.add_custom_button(__('Test Progressive Balances'), function() {
-                test_progressive_balance_calculation(frm);
-            }, __('Debug'));
         }
     },
 
@@ -578,14 +582,19 @@ function add_accordion_progressive_summary(frm) {
 }
 
 function create_accordion_progressive_summary(frm) {
-    // Find the transfer items section
-    let transfer_items_section = frm.get_field('transfer_items');
-    if (!transfer_items_section || !transfer_items_section.$wrapper) {
-        return;
+    // Find the modern cards container or fallback to transfer items section
+    let target_container = $('.modern-transfer-cards-container');
+    if (target_container.length === 0) {
+        // Fallback to transfer items section if cards not found
+        let transfer_items_section = frm.get_field('transfer_items');
+        if (!transfer_items_section || !transfer_items_section.$wrapper) {
+            return;
+        }
+        target_container = transfer_items_section.$wrapper;
     }
 
     // Remove existing summary if present
-    transfer_items_section.$wrapper.find('.accordion-progressive-summary').remove();
+    target_container.find('.accordion-progressive-summary').remove();
 
     // Create accordion-style summary
     let summary_html = generate_accordion_progressive_summary_html(frm);
@@ -615,8 +624,8 @@ function create_accordion_progressive_summary(frm) {
         </div>
     `);
 
-    // Append after the transfer items table
-    transfer_items_section.$wrapper.append(accordion_div);
+    // Append to target container
+    target_container.append(accordion_div);
 
     // Mark as visible for refresh functionality
     frm._accordion_summary_visible = true;
@@ -829,14 +838,19 @@ function generate_accordion_progressive_summary_html(frm) {
 function refresh_inline_summary_if_visible(frm) {
     // Refresh the accordion progressive summary if it's currently visible
     if (frm._accordion_summary_visible) {
-        let transfer_items_section = frm.get_field('transfer_items');
-        if (transfer_items_section && transfer_items_section.$wrapper) {
-            let summary_wrapper = transfer_items_section.$wrapper.find('.accordion-progressive-summary .summary-content');
-            if (summary_wrapper.length > 0) {
-                // Update the summary content
-                let new_html = generate_accordion_progressive_summary_html(frm);
-                summary_wrapper.html(new_html);
+        // Look for accordion in cards container first, then fallback to transfer items section
+        let summary_wrapper = $('.modern-transfer-cards-container .accordion-progressive-summary .summary-content');
+        if (summary_wrapper.length === 0) {
+            let transfer_items_section = frm.get_field('transfer_items');
+            if (transfer_items_section && transfer_items_section.$wrapper) {
+                summary_wrapper = transfer_items_section.$wrapper.find('.accordion-progressive-summary .summary-content');
             }
+        }
+
+        if (summary_wrapper.length > 0) {
+            // Update the summary content
+            let new_html = generate_accordion_progressive_summary_html(frm);
+            summary_wrapper.html(new_html);
         }
     }
 }
@@ -884,6 +898,506 @@ function test_progressive_balance_calculation(frm) {
 
     frappe.msgprint('Check console for progressive balance test results');
 }
+
+function initialize_modern_transfer_interface(frm) {
+    // Initialize the modern card-based transfer items interface
+
+    // Force hide the table completely for all document states
+    if (frm.fields_dict.transfer_items) {
+        frm.fields_dict.transfer_items.wrapper.style.display = 'none';
+        frm.fields_dict.transfer_items.$wrapper.hide();
+
+        // Also hide any table headers or controls
+        frm.fields_dict.transfer_items.$wrapper.find('.grid-heading-row').hide();
+        frm.fields_dict.transfer_items.$wrapper.find('.grid-add-row').hide();
+        frm.fields_dict.transfer_items.$wrapper.find('.grid-footer').hide();
+    }
+
+    // Create modern card interface container
+    create_modern_transfer_cards_container(frm);
+
+    // Load existing transfer items into cards
+    refresh_transfer_cards(frm);
+}
+
+function create_modern_transfer_cards_container(frm) {
+    // Find the Multi-Account Transfers section
+    let target_section = null;
+
+    // Look for the section containing transfer_items field
+    if (frm.fields_dict.transfer_items && frm.fields_dict.transfer_items.$wrapper) {
+        target_section = frm.fields_dict.transfer_items.$wrapper.closest('.section-body');
+    }
+
+    // Fallback to budget field section if transfer_items section not found
+    if (!target_section && frm.fields_dict.budget && frm.fields_dict.budget.$wrapper) {
+        target_section = frm.fields_dict.budget.$wrapper.closest('.section-body');
+    }
+
+    if (!target_section || target_section.length === 0) {
+        console.log('Could not find target section for modern cards container');
+        return;
+    }
+
+    // Remove existing container if present
+    $('.modern-transfer-cards-container').remove();
+
+    // Create the modern cards container with Frappe styling
+    let cards_html = `
+        <div class="modern-transfer-cards-container" style="margin: 15px 0;">
+            <div class="section-head" style="margin-bottom: 15px;">
+                <label class="control-label" style="font-weight: 600; color: #36414C; margin-bottom: 0;">
+                    Transfer Items
+                </label>
+            </div>
+            <div class="transfer-cards-list">
+                <!-- Transfer cards will be inserted here -->
+            </div>
+            <div class="grid-add-row" style="margin-top: 10px; ${frm.doc.docstatus !== 0 ? 'display: none;' : ''}">
+                <button class="btn btn-xs btn-default grid-add-row add-transfer-btn" style="margin-right: 5px;">
+                    <i class="octicon octicon-plus" style="margin-right: 4px;"></i>
+                    Add Row
+                </button>
+            </div>
+        </div>
+    `;
+
+    // Insert at the beginning of the target section
+    target_section.prepend(cards_html);
+
+    // Bind add transfer button
+    target_section.find('.add-transfer-btn').on('click', function() {
+        add_new_transfer_card(frm);
+    });
+}
+
+function add_new_transfer_card(frm) {
+    // Add a new transfer item to the backend table
+    let new_row = frappe.model.add_child(frm.doc, 'Budget Request Item', 'transfer_items');
+
+    // Refresh the cards display
+    refresh_transfer_cards(frm);
+
+    // Focus on the new card
+    setTimeout(() => {
+        let new_card = $(`.transfer-card[data-idx="${new_row.idx}"]`);
+        if (new_card.length > 0) {
+            new_card[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+            new_card.find('.from-account-select').focus();
+        }
+    }, 100);
+}
+
+function refresh_transfer_cards(frm) {
+    // Refresh all transfer cards based on current transfer_items data
+    let cards_container = $('.transfer-cards-list');
+    if (cards_container.length === 0) {
+        return;
+    }
+
+    // Clear existing cards
+    cards_container.empty();
+
+    // Create cards for each transfer item
+    if (frm.doc.transfer_items && frm.doc.transfer_items.length > 0) {
+        frm.doc.transfer_items.forEach((item, index) => {
+            create_transfer_card(frm, item, index, cards_container);
+        });
+    } else {
+        // Show empty state
+        cards_container.html(`
+            <div class="empty-state" style="text-align: center; padding: 30px; color: #8D99AE; background: #fafbfc; border: 1px dashed #d1d8dd; border-radius: 4px;">
+                <div style="font-size: 13px;">No transfer items</div>
+                <div style="font-size: 11px; margin-top: 5px;">Click "Add Row" to add transfer items</div>
+            </div>
+        `);
+    }
+
+    // Update the existing accordion progressive summary
+    refresh_inline_summary_if_visible(frm);
+}
+
+function create_transfer_card(frm, item, index, container) {
+    // No balance display needed in cards - keep it clean
+
+    let card_html = `
+        <div class="transfer-card" data-idx="${item.idx}" style="
+            background: #fafbfc;
+            border: 1px solid #d1d8dd;
+            border-radius: 4px;
+            padding: 15px;
+            margin-bottom: 10px;
+            position: relative;
+        ">
+            <div class="row" style="margin: 0;">
+                <div class="col-sm-5" style="padding-right: 8px;">
+                    <div class="frappe-control">
+                        <label class="control-label" style="font-size: 11px; color: #8D99AE; margin-bottom: 4px;">From Account</label>
+                        <select class="form-control from-account-select" data-idx="${item.idx}" style="font-size: 13px; height: 30px;" ${frm.doc.docstatus !== 0 ? 'disabled' : ''}>
+                            <option value="">Select account...</option>
+                        </select>
+                        <div class="new-balance-display from-balance" data-idx="${item.idx}" style="font-size: 11px; color: #8D99AE; margin-top: 2px; min-height: 14px;">
+                            <!-- New balance will be shown here -->
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-sm-5" style="padding-left: 8px; padding-right: 8px;">
+                    <div class="frappe-control">
+                        <label class="control-label" style="font-size: 11px; color: #8D99AE; margin-bottom: 4px;">To Account</label>
+                        <select class="form-control to-account-select" data-idx="${item.idx}" style="font-size: 13px; height: 30px;" ${frm.doc.docstatus !== 0 ? 'disabled' : ''}>
+                            <option value="">Select account...</option>
+                        </select>
+                        <div class="new-balance-display to-balance" data-idx="${item.idx}" style="font-size: 11px; color: #8D99AE; margin-top: 2px; min-height: 14px;">
+                            <!-- New balance will be shown here -->
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-sm-2" style="padding-left: 8px;">
+                    <div class="frappe-control">
+                        <label class="control-label" style="font-size: 11px; color: #8D99AE; margin-bottom: 4px;">Amount</label>
+                        <div style="display: flex; align-items: center;">
+                            <input type="number" class="form-control amount-input" data-idx="${item.idx}"
+                                   value="${item.amount_requested || ''}"
+                                   placeholder="0.00"
+                                   style="font-size: 13px; height: 30px; text-align: right; flex: 1;" ${frm.doc.docstatus !== 0 ? 'disabled' : ''}>
+                            <button class="btn btn-xs remove-card-btn" data-idx="${item.idx}"
+                                    style="margin-left: 5px; color: #d1d8dd; border: none; background: none; padding: 2px 4px; ${frm.doc.docstatus !== 0 ? 'display: none;' : ''}"
+                                    title="Remove">
+                                <i class="fa fa-remove" style="font-size: 12px;"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    container.append(card_html);
+
+    // Populate dropdowns and bind events
+    populate_card_dropdowns(frm, item, index);
+    bind_card_events(frm, item.idx);
+
+    // Update new balance displays
+    update_card_balance_displays(frm, item.idx);
+}
+
+function get_progressive_balance_display(frm, account, budget, progressive_balances, current_index) {
+    if (!account || !budget) {
+        return '<span style="color: #8D99AE;">Select account to see balance</span>';
+    }
+
+    // Get original balance
+    frappe.call({
+        method: 'wcfcb_zm.api.budget_request.get_amount',
+        args: {
+            budget: budget,
+            account: account
+        },
+        async: false,
+        callback: function(r) {
+            if (r.message !== undefined) {
+                window._temp_original_balance = r.message;
+            }
+        }
+    });
+
+    let original_balance = window._temp_original_balance || 0;
+    let progressive_key = `${account}|${budget}`;
+    let progressive_change = progressive_balances[progressive_key] || 0;
+    let current_balance = original_balance + progressive_change;
+
+    if (progressive_change !== 0) {
+        return `<strong>K ${original_balance.toLocaleString()} → K ${current_balance.toLocaleString()}</strong>`;
+    } else {
+        return `<strong>K ${original_balance.toLocaleString()}</strong>`;
+    }
+}
+
+function update_card_balance_displays(frm, idx) {
+    // Update the new balance displays for a specific card
+    let item = frm.doc.transfer_items.find(i => i.idx === idx);
+    if (!item) return;
+
+    let amount = flt(item.amount_requested || 0);
+
+    // Calculate progressive balances up to this point (before this transfer)
+    let item_index = get_item_index(frm, idx);
+    let progressive_balances = calculate_client_side_progressive_balances(frm, item_index);
+
+    // Update FROM account balance (original + progressive - this transfer amount)
+    if (item.from_account && frm.doc.budget) {
+        let progressive_key = `${item.from_account}|${frm.doc.budget}`;
+        let progressive_change = progressive_balances[progressive_key] || 0;
+        update_balance_with_original_and_change(frm, item.from_account, frm.doc.budget, progressive_change - amount, `.from-balance[data-idx="${idx}"]`);
+    }
+
+    // Update TO account balance (original + progressive + this transfer amount)
+    let to_budget = frm.doc.virement_type === 'Inter-Budget' ? frm.doc.target_budget : frm.doc.budget;
+    if (item.to_account && to_budget) {
+        let progressive_key = `${item.to_account}|${to_budget}`;
+        let progressive_change = progressive_balances[progressive_key] || 0;
+        update_balance_with_original_and_change(frm, item.to_account, to_budget, progressive_change + amount, `.to-balance[data-idx="${idx}"]`);
+    }
+}
+
+function update_balance_with_original_and_change(frm, account, budget, total_change, selector) {
+    // Get original balance and apply the total change
+    let cache_key = `${account}|${budget}`;
+
+    if (frm._balance_cache && frm._balance_cache[cache_key] !== undefined) {
+        // Use cached balance
+        let original_amount = frm._balance_cache[cache_key];
+        let new_amount = original_amount + total_change;
+        $(selector).html(`<span style="color: ${new_amount >= 0 ? '#28a745' : '#dc3545'};">New Balance: K ${new_amount.toLocaleString()}</span>`);
+    } else {
+        // Fetch from API and cache
+        frappe.call({
+            method: 'wcfcb_zm.api.budget_request.get_amount',
+            args: {
+                budget: budget,
+                account: account
+            },
+            callback: function(r) {
+                if (r.message !== undefined) {
+                    // Cache the balance
+                    if (!frm._balance_cache) frm._balance_cache = {};
+                    frm._balance_cache[cache_key] = r.message;
+
+                    let original_amount = r.message;
+                    let new_amount = original_amount + total_change;
+                    $(selector).html(`<span style="color: ${new_amount >= 0 ? '#28a745' : '#dc3545'};">New Balance: K ${new_amount.toLocaleString()}</span>`);
+                }
+            }
+        });
+    }
+}
+
+function update_single_balance_display(frm, account, budget, amount_change, selector) {
+    // Use cached balance if available, otherwise fetch from API
+    let cache_key = `${account}|${budget}`;
+
+    if (frm._balance_cache && frm._balance_cache[cache_key] !== undefined) {
+        // Use cached balance
+        let current_amount = frm._balance_cache[cache_key];
+        let new_amount = current_amount + amount_change;
+        $(selector).html(`<span style="color: ${amount_change >= 0 ? '#28a745' : '#dc3545'};">New Balance: K ${new_amount.toLocaleString()}</span>`);
+    } else {
+        // Fetch from API and cache
+        frappe.call({
+            method: 'wcfcb_zm.api.budget_request.get_amount',
+            args: {
+                budget: budget,
+                account: account
+            },
+            callback: function(r) {
+                if (r.message !== undefined) {
+                    // Cache the balance
+                    if (!frm._balance_cache) frm._balance_cache = {};
+                    frm._balance_cache[cache_key] = r.message;
+
+                    let current_amount = r.message;
+                    let new_amount = current_amount + amount_change;
+                    $(selector).html(`<span style="color: ${amount_change >= 0 ? '#28a745' : '#dc3545'};">New Balance: K ${new_amount.toLocaleString()}</span>`);
+                }
+            }
+        });
+    }
+}
+
+function populate_card_dropdowns(frm, item, index) {
+    // Populate FROM account dropdown
+    populate_from_account_dropdown(frm, item, index);
+
+    // Populate TO account dropdown
+    populate_to_account_dropdown(frm, item, index);
+}
+
+function populate_from_account_dropdown(frm, item, index) {
+    if (!frm.doc.budget) return;
+
+    let progressive_balances = calculate_client_side_progressive_balances(frm, index);
+
+    frappe.call({
+        method: 'wcfcb_zm.api.budget_request.get_budget_accounts_with_progressive',
+        args: {
+            filters: {
+                'budget': frm.doc.budget,
+                'progressive_balances': JSON.stringify(progressive_balances)
+            }
+        },
+        callback: function(r) {
+            if (r.message) {
+                let select = $(`.from-account-select[data-idx="${item.idx}"]`);
+                select.empty().append('<option value="">Select account...</option>');
+
+                r.message.forEach(function(account) {
+                    let selected = account[0] === item.from_account ? 'selected' : '';
+                    select.append(`<option value="${account[0]}" ${selected}>${account[1]}</option>`);
+                });
+            }
+        }
+    });
+}
+
+function populate_to_account_dropdown(frm, item, index) {
+    let target_budget = frm.doc.virement_type === 'Inter-Budget' ? frm.doc.target_budget : frm.doc.budget;
+    if (!target_budget) return;
+
+    let progressive_balances = calculate_client_side_progressive_balances(frm, index, target_budget);
+
+    frappe.call({
+        method: 'wcfcb_zm.api.budget_request.get_budget_accounts_with_progressive',
+        args: {
+            filters: {
+                'budget': target_budget,
+                'exclude_account': frm.doc.virement_type === 'Intra-Budget' ? item.from_account : null,
+                'progressive_balances': JSON.stringify(progressive_balances)
+            }
+        },
+        callback: function(r) {
+            if (r.message) {
+                let select = $(`.to-account-select[data-idx="${item.idx}"]`);
+                select.empty().append('<option value="">Select account...</option>');
+
+                r.message.forEach(function(account) {
+                    let selected = account[0] === item.to_account ? 'selected' : '';
+                    select.append(`<option value="${account[0]}" ${selected}>${account[1]}</option>`);
+                });
+            }
+        }
+    });
+}
+
+function bind_card_events(frm, idx) {
+    // Bind FROM account change
+    $(`.from-account-select[data-idx="${idx}"]`).on('change', function() {
+        let account = $(this).val();
+        let item = frm.doc.transfer_items.find(i => i.idx === idx);
+        if (item) {
+            item.from_account = account;
+            refresh_single_card(frm, idx);
+            update_card_balance_displays(frm, idx);
+            refresh_inline_summary_if_visible(frm);
+        }
+    });
+
+    // Bind TO account change
+    $(`.to-account-select[data-idx="${idx}"]`).on('change', function() {
+        let account = $(this).val();
+        let item = frm.doc.transfer_items.find(i => i.idx === idx);
+        if (item) {
+            item.to_account = account;
+            refresh_single_card(frm, idx);
+            update_card_balance_displays(frm, idx);
+            refresh_inline_summary_if_visible(frm);
+        }
+    });
+
+    // Bind amount change
+    $(`.amount-input[data-idx="${idx}"]`).on('input', function() {
+        let amount = flt($(this).val());
+        let item = frm.doc.transfer_items.find(i => i.idx === idx);
+        if (item) {
+            item.amount_requested = amount;
+            refresh_all_cards_after_index(frm, get_item_index(frm, idx));
+            update_card_balance_displays(frm, idx);
+            refresh_inline_summary_if_visible(frm);
+        }
+    });
+
+    // Bind remove button
+    $(`.remove-card-btn[data-idx="${idx}"]`).on('click', function() {
+        remove_transfer_card(frm, idx);
+    });
+}
+
+function refresh_single_card(frm, idx) {
+    // Refresh a single card's dropdowns and balances
+    let item = frm.doc.transfer_items.find(i => i.idx === idx);
+    if (!item) return;
+
+    let index = get_item_index(frm, idx);
+    populate_card_dropdowns(frm, item, index);
+
+    // Update balance displays
+    let progressive_balances = calculate_client_side_progressive_balances(frm, index);
+    let from_balance = get_progressive_balance_display(frm, item.from_account, frm.doc.budget, progressive_balances, index);
+    let to_balance = get_progressive_balance_display(frm, item.to_account,
+        frm.doc.virement_type === 'Inter-Budget' ? frm.doc.target_budget : frm.doc.budget,
+        progressive_balances, index);
+
+    $(`.transfer-card[data-idx="${idx}"] .from-section .balance-display`).html(from_balance);
+    $(`.transfer-card[data-idx="${idx}"] .to-section .balance-display`).html(to_balance);
+}
+
+function refresh_all_cards_after_index(frm, start_index) {
+    // Refresh all cards from start_index onwards (for progressive balance updates)
+    if (!frm.doc.transfer_items) return;
+
+    for (let i = start_index; i < frm.doc.transfer_items.length; i++) {
+        let item = frm.doc.transfer_items[i];
+        refresh_single_card(frm, item.idx);
+    }
+}
+
+function get_item_index(frm, idx) {
+    // Get the index of an item by its idx
+    if (!frm.doc.transfer_items) return -1;
+    return frm.doc.transfer_items.findIndex(i => i.idx === idx);
+}
+
+function remove_transfer_card(frm, idx) {
+    // Remove a transfer card and update the backend
+    frappe.confirm('Remove this transfer?', function() {
+        // Remove from backend
+        frm.doc.transfer_items = frm.doc.transfer_items.filter(i => i.idx !== idx);
+
+        // Refresh all cards
+        refresh_transfer_cards(frm);
+
+        // Update form
+        frm.dirty();
+    });
+}
+
+function update_progressive_summary(frm) {
+    // Update the progressive summary at the bottom
+    let summary_container = $('.progressive-summary-container');
+    if (summary_container.length === 0) return;
+
+    if (!frm.doc.transfer_items || frm.doc.transfer_items.length === 0) {
+        summary_container.empty();
+        return;
+    }
+
+    // Generate the same accordion summary as before
+    let summary_html = generate_accordion_progressive_summary_html(frm);
+
+    summary_container.html(`
+        <div class="card" style="border: 1px solid #dee2e6; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <div class="card-header" style="background: linear-gradient(135deg, #347FB6 0%, #ED8643 100%); border-radius: 8px 8px 0 0; cursor: pointer;"
+                 onclick="$(this).next('.card-body').slideToggle(); $(this).find('.toggle-icon').toggleClass('fa-chevron-down fa-chevron-up');">
+                <h6 style="margin: 0; color: white; font-weight: 600; display: flex; align-items: center; justify-content: space-between;">
+                    <span>
+                        <i class="fa fa-chart-line" style="margin-right: 8px;"></i>
+                        Transfer Summary
+                    </span>
+                    <i class="fa fa-chevron-down toggle-icon" style="transition: transform 0.3s ease;"></i>
+                </h6>
+            </div>
+            <div class="card-body" style="padding: 20px; background-color: #f8f9fa; border-radius: 0 0 8px 8px; display: none;">
+                <div class="summary-content">
+                    ${summary_html}
+                </div>
+            </div>
+        </div>
+    `);
+}
+
+
 
 function generate_transfer_details_html(frm) {
     if (is_multi_transfer_mode(frm)) {
