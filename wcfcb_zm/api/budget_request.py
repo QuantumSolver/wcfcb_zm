@@ -273,6 +273,9 @@ def get_budget_accounts_with_progressive(doctype=None, txt=None, searchfield=Non
         except:
             progressive_balances = {}
 
+        # Debug logging
+        frappe.log_error(f"Progressive balances API called - Budget: {budget}, Progressive: {progressive_balances}", "Progressive Balance Debug")
+
         # Base query to get accounts with original amounts
         base_query = """
             SELECT

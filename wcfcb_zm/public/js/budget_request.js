@@ -18,6 +18,13 @@ frappe.ui.form.on('Budget Request', {
         if (is_multi_transfer_mode(frm)) {
             add_accordion_progressive_summary(frm);
         }
+
+        // Add test button for debugging progressive balances
+        if (frm.doc.docstatus === 0) {
+            frm.add_custom_button(__('Test Progressive Balances'), function() {
+                test_progressive_balance_calculation(frm);
+            }, __('Debug'));
+        }
     },
 
     onload_post_render: function(frm) {
@@ -291,6 +298,8 @@ frappe.ui.form.on('Budget Request Item', {
             frappe.model.set_value(cdt, cdn, 'from_available', 0);
             frappe.model.set_value(cdt, cdn, 'from_remaining', 0);
         }
+        // Refresh all dropdowns to update progressive balances
+        refresh_all_transfer_item_dropdowns(frm);
         // Refresh inline summary if visible
         refresh_inline_summary_if_visible(frm);
     },
@@ -315,6 +324,8 @@ frappe.ui.form.on('Budget Request Item', {
             frappe.model.set_value(cdt, cdn, 'to_available', 0);
             frappe.model.set_value(cdt, cdn, 'to_new_amount', 0);
         }
+        // Refresh all dropdowns to update progressive balances
+        refresh_all_transfer_item_dropdowns(frm);
         // Refresh inline summary if visible
         refresh_inline_summary_if_visible(frm);
     },
@@ -323,6 +334,8 @@ frappe.ui.form.on('Budget Request Item', {
         calculate_transfer_item_balances(frm, cdt, cdn);
         // Check threshold for multi-transfer mode
         handle_threshold_validation(frm);
+        // Refresh all dropdowns to update progressive balances
+        refresh_all_transfer_item_dropdowns(frm);
         // Refresh inline summary if visible
         refresh_inline_summary_if_visible(frm);
     },
@@ -447,11 +460,15 @@ function setup_transfer_item_filters(frm) {
         let current_row_idx = get_row_index(frm, cdt, cdn);
         let progressive_balances = calculate_client_side_progressive_balances(frm, current_row_idx);
 
+        console.log('FROM account query - Row:', current_row_idx, 'Progressive balances:', progressive_balances);
+
         return {
             query: 'wcfcb_zm.api.budget_request.get_budget_accounts_with_progressive',
             filters: {
                 'budget': frm.doc.budget,
-                'progressive_balances': JSON.stringify(progressive_balances)
+                'progressive_balances': JSON.stringify(progressive_balances),
+                '_timestamp': Date.now(), // Force refresh
+                '_row_index': current_row_idx // Add row context
             }
         };
     });
@@ -469,12 +486,16 @@ function setup_transfer_item_filters(frm) {
         let current_row_idx = get_row_index(frm, cdt, cdn);
         let progressive_balances = calculate_client_side_progressive_balances(frm, current_row_idx, target_budget);
 
+        console.log('TO account query - Row:', current_row_idx, 'Target budget:', target_budget, 'Progressive balances:', progressive_balances);
+
         return {
             query: 'wcfcb_zm.api.budget_request.get_budget_accounts_with_progressive',
             filters: {
                 'budget': target_budget,
                 'exclude_account': frm.doc.virement_type === 'Intra-Budget' ? row.from_account : null,
-                'progressive_balances': JSON.stringify(progressive_balances)
+                'progressive_balances': JSON.stringify(progressive_balances),
+                '_timestamp': Date.now(), // Force refresh
+                '_row_index': current_row_idx // Add row context
             }
         };
     });
@@ -818,6 +839,50 @@ function refresh_inline_summary_if_visible(frm) {
             }
         }
     }
+}
+
+function refresh_all_transfer_item_dropdowns(frm) {
+    // Simple approach: just re-setup the queries
+    // The queries will be re-evaluated when the dropdowns are next opened
+    console.log('Re-setting up transfer item filters for progressive balances...');
+
+    // Re-setup the queries - this is safer than trying to manipulate DOM directly
+    setTimeout(() => {
+        setup_transfer_item_filters(frm);
+    }, 100);
+}
+
+function test_progressive_balance_calculation(frm) {
+    // Test function to debug progressive balance calculations
+    console.log('=== TESTING PROGRESSIVE BALANCE CALCULATION ===');
+
+    if (!frm.doc.transfer_items || frm.doc.transfer_items.length === 0) {
+        frappe.msgprint('No transfer items to test');
+        return;
+    }
+
+    // Test progressive balance calculation for each row
+    for (let i = 0; i < frm.doc.transfer_items.length; i++) {
+        let progressive_balances = calculate_client_side_progressive_balances(frm, i);
+        console.log(`Row ${i} progressive balances:`, progressive_balances);
+
+        // Test API call
+        frappe.call({
+            method: 'wcfcb_zm.api.budget_request.get_budget_accounts_with_progressive',
+            args: {
+                filters: {
+                    'budget': frm.doc.budget,
+                    'progressive_balances': JSON.stringify(progressive_balances),
+                    '_timestamp': Date.now()
+                }
+            },
+            callback: function(r) {
+                console.log(`Row ${i} API response:`, r.message);
+            }
+        });
+    }
+
+    frappe.msgprint('Check console for progressive balance test results');
 }
 
 function generate_transfer_details_html(frm) {
