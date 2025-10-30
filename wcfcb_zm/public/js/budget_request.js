@@ -5,13 +5,11 @@ frappe.ui.form.on('Budget Request', {
     refresh: function(frm) {
         setup_field_dependencies(frm);
 
-        // Force new requests to use multi-transfer mode
-        if (frm.is_new()) {
-            force_multi_transfer_mode(frm);
-        }
-
         // Set up account filters for transfer items
         setup_transfer_item_filters(frm);
+
+        // ALWAYS force multi-transfer mode (remove legacy mode completely)
+        force_multi_transfer_mode(frm);
 
         // Add View Summary button for approved requests
         add_view_summary_button(frm);
@@ -22,6 +20,11 @@ frappe.ui.form.on('Budget Request', {
         if (frm.doc.amended_from && frm.is_new()) {
             copy_fields_from_amended_doc(frm);
         }
+
+        // Ensure field properties are set correctly after render
+        setTimeout(function() {
+            force_multi_transfer_mode(frm);
+        }, 100);
     },
 
     virement_type: function(frm) {
@@ -53,7 +56,10 @@ frappe.ui.form.on('Budget Request', {
     },
 
     amount_requested: function(frm) {
-        handle_amount_change(frm);
+        // Only for legacy single-transfer mode
+        if (!frm.is_new()) {
+            handle_amount_change(frm);
+        }
     },
 
     workflow_state: function(frm) {
@@ -63,9 +69,7 @@ frappe.ui.form.on('Budget Request', {
             clear_external_approval_message(frm);
         } else {
             // Re-check amount for new workflow state
-            if (frm.doc.amount_requested) {
-                handle_amount_change(frm);
-            }
+            handle_threshold_validation(frm);
         }
     },
 
@@ -197,9 +201,9 @@ frappe.ui.form.on('Budget Request', {
                                             'virement_type': frm.doc.virement_type,
                                             'budget': frm.doc.budget,
                                             'target_budget': frm.doc.target_budget || '',
-                                            'expense_account': frm.doc.expense_account,
-                                            'to_expense_account': frm.doc.to_expense_account,
-                                            'amount_requested': frm.doc.amount_requested
+                                            'expense_account': frm.doc.expense_account || '',
+                                            'to_expense_account': frm.doc.to_expense_account || '',
+                                            'amount_requested': frm.doc.amount_requested || 0
                                         },
                                         callback: function(r) {
                                             if (r.message && r.message.success) {
@@ -308,6 +312,8 @@ frappe.ui.form.on('Budget Request Item', {
 
     amount_requested: function(frm, cdt, cdn) {
         calculate_transfer_item_balances(frm, cdt, cdn);
+        // Check threshold for multi-transfer mode
+        handle_threshold_validation(frm);
     },
 
     transfer_items_remove: function(frm) {
@@ -394,18 +400,26 @@ function calculate_total_transfer_amount(frm) {
         });
     }
 
+    console.log('Calculated total:', total, 'Is new:', frm.is_new());
+
     // Store total for validation purposes
     frm._total_transfer_amount = total;
+
+    // ALWAYS update the amount_requested field to show total
+    frm.doc.amount_requested = total;
+    frm.refresh_field('amount_requested');
+    console.log('Set amount_requested to:', total);
 
     // Update display or validation as needed
     frm.refresh_field('transfer_items');
 }
 
 function setup_transfer_item_filters(frm) {
-    if (!frm.doc.budget) return;
-
     // Set up filters for from_account field
     frm.set_query('from_account', 'transfer_items', function() {
+        if (!frm.doc.budget) {
+            return { filters: { 'name': 'no-match' } }; // Return empty result if no budget
+        }
         return {
             query: 'wcfcb_zm.api.budget_request.get_budget_accounts',
             filters: {
@@ -419,7 +433,9 @@ function setup_transfer_item_filters(frm) {
         let row = locals[cdt][cdn];
         let target_budget = frm.doc.virement_type === 'Inter-Budget' ? frm.doc.target_budget : frm.doc.budget;
 
-        if (!target_budget) return {};
+        if (!target_budget) {
+            return { filters: { 'name': 'no-match' } }; // Return empty result if no target budget
+        }
 
         return {
             query: 'wcfcb_zm.api.budget_request.get_budget_accounts',
@@ -513,8 +529,8 @@ function setup_field_dependencies(frm) {
     if (final_states.includes(frm.doc.workflow_state) || frm.doc.docstatus === 2) {
         // Clear any existing messages for final states or cancelled documents
         clear_external_approval_message(frm);
-    } else if (frm.doc.amount_requested) {
-        handle_amount_change(frm);
+    } else {
+        handle_threshold_validation(frm);
     }
 
     // Force refresh of all relevant fields
@@ -528,8 +544,12 @@ function disable_dependent_fields(frm) {
     // Disable fields until prerequisites are met
     frm.set_df_property('budget', 'read_only', !frm.doc.virement_type);
     frm.set_df_property('target_budget', 'read_only', !frm.doc.virement_type);
-    frm.set_df_property('expense_account', 'read_only', !frm.doc.budget);
-    frm.set_df_property('to_expense_account', 'read_only', !can_enable_to_account(frm));
+
+    // Only manage legacy fields for existing requests (not new ones)
+    if (!frm.is_new()) {
+        frm.set_df_property('expense_account', 'read_only', !frm.doc.budget);
+        frm.set_df_property('to_expense_account', 'read_only', !can_enable_to_account(frm));
+    }
 }
 
 function can_enable_to_account(frm) {
@@ -630,11 +650,7 @@ function handle_virement_type_change(frm) {
     // Update field states
     disable_dependent_fields(frm);
 
-    // Clear account queries
-    frm.set_query('expense_account', function() { return {}; });
-    frm.set_query('to_expense_account', function() { return {}; });
-    frm.refresh_field('expense_account');
-    frm.refresh_field('to_expense_account');
+    // Field visibility and behavior will be handled by force_multi_transfer_mode() ALWAYS
 }
 
 function handle_budget_change(frm) {
@@ -658,33 +674,35 @@ function handle_budget_change(frm) {
             frm.refresh_field('target_budget');
         }
 
-        // Set FROM account query based on source budget
-        frappe.call({
-            method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
-            args: {
-                'action': 'get_budget_accounts',
-                'budget': frm.doc.budget
-            },
-            callback: function(r) {
-                if (r.message && r.message.success) {
-                    let account_names = r.message.data.map(a => a.value);
-                    frm.set_query('expense_account', function() {
-                        return {
-                            filters: [
-                                ['Account', 'name', 'in', account_names]
-                            ]
-                        };
-                    });
-                    frm.refresh_field('expense_account');
+        // For legacy requests only - set FROM account query based on source budget
+        if (!frm.is_new()) {
+            frappe.call({
+                method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
+                args: {
+                    'action': 'get_budget_accounts',
+                    'budget': frm.doc.budget
+                },
+                callback: function(r) {
+                    if (r.message && r.message.success) {
+                        let account_names = r.message.data.map(a => a.value);
+                        frm.set_query('expense_account', function() {
+                            return {
+                                filters: [
+                                    ['Account', 'name', 'in', account_names]
+                                ]
+                            };
+                        });
+                        frm.refresh_field('expense_account');
+                    }
                 }
-            }
-        });
+            });
 
-        // Clear expense_account when budget changes
-        frm.set_value('expense_account', '');
+            // Clear expense_account when budget changes
+            frm.set_value('expense_account', '');
 
-        // Enable expense_account field now that budget is selected
-        frm.set_df_property('expense_account', 'read_only', 0);
+            // Enable expense_account field now that budget is selected
+            frm.set_df_property('expense_account', 'read_only', 0);
+        }
     }
 
     // ALWAYS clear TO account and its query when source budget changes
@@ -698,67 +716,72 @@ function handle_budget_change(frm) {
 
 function handle_target_budget_change(frm) {
     if (frm.doc.target_budget && frm.doc.virement_type === 'Inter-Budget') {
-        // Set TO account filter based on target budget for Inter-Budget transfers
-        frappe.call({
-            method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
-            args: {
-                'action': 'get_budget_accounts',
-                'budget': frm.doc.target_budget
-            },
-            callback: function(r) {
-                if (r.message && r.message.success) {
-                    let account_names = r.message.data.map(a => a.value);
-                    frm.set_query('to_expense_account', function() {
-                        return {
-                            filters: [
-                                ['Account', 'name', 'in', account_names]
-                            ]
-                        };
-                    });
-                    frm.refresh_field('to_expense_account');
+        // For legacy requests only - set TO account filter based on target budget for Inter-Budget transfers
+        if (!frm.is_new()) {
+            frappe.call({
+                method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
+                args: {
+                    'action': 'get_budget_accounts',
+                    'budget': frm.doc.target_budget
+                },
+                callback: function(r) {
+                    if (r.message && r.message.success) {
+                        let account_names = r.message.data.map(a => a.value);
+                        frm.set_query('to_expense_account', function() {
+                            return {
+                                filters: [
+                                    ['Account', 'name', 'in', account_names]
+                                ]
+                            };
+                        });
+                        frm.refresh_field('to_expense_account');
+                    }
                 }
-            }
-        });
+            });
 
-        // Clear TO account when target budget changes
-        frm.set_value('to_expense_account', '');
+            // Clear TO account when target budget changes
+            frm.set_value('to_expense_account', '');
 
-        // Update field states - TO account can now be enabled for Inter-Budget
-        disable_dependent_fields(frm);
+            // Update field states - TO account can now be enabled for Inter-Budget
+            disable_dependent_fields(frm);
+        }
     }
 }
 
 function handle_expense_account_change(frm) {
-    // ALWAYS clear TO account when FROM account changes
-    frm.set_value('to_expense_account', '');
+    // For legacy requests only
+    if (!frm.is_new()) {
+        // ALWAYS clear TO account when FROM account changes
+        frm.set_value('to_expense_account', '');
 
-    if (frm.doc.expense_account && frm.doc.virement_type === 'Intra-Budget') {
-        // Update TO account filter to exclude selected FROM account for Intra-Budget
-        frappe.call({
-            method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
-            args: {
-                'action': 'get_budget_accounts',
-                'budget': frm.doc.budget,
-                'exclude_account': frm.doc.expense_account
-            },
-            callback: function(r) {
-                if (r.message && r.message.success) {
-                    let account_names = r.message.data.map(a => a.value);
-                    frm.set_query('to_expense_account', function() {
-                        return {
-                            filters: [
-                                ['Account', 'name', 'in', account_names]
-                            ]
-                        };
-                    });
-                    frm.refresh_field('to_expense_account');
+        if (frm.doc.expense_account && frm.doc.virement_type === 'Intra-Budget') {
+            // Update TO account filter to exclude selected FROM account for Intra-Budget
+            frappe.call({
+                method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
+                args: {
+                    'action': 'get_budget_accounts',
+                    'budget': frm.doc.budget,
+                    'exclude_account': frm.doc.expense_account
+                },
+                callback: function(r) {
+                    if (r.message && r.message.success) {
+                        let account_names = r.message.data.map(a => a.value);
+                        frm.set_query('to_expense_account', function() {
+                            return {
+                                filters: [
+                                    ['Account', 'name', 'in', account_names]
+                                ]
+                            };
+                        });
+                        frm.refresh_field('to_expense_account');
+                    }
                 }
-            }
-        });
-    }
+            });
+        }
 
-    // Update field states - TO account can now be enabled for Intra-Budget
-    disable_dependent_fields(frm);
+        // Update field states - TO account can now be enabled for Intra-Budget
+        disable_dependent_fields(frm);
+    }
 }
 
 function handle_to_expense_account_change(frm) {
@@ -815,8 +838,9 @@ function validate_virement_request(frm) {
             }
         }
 
-        // Ensure single-transfer fields are empty in multi-transfer mode
-        if (frm.doc.expense_account || frm.doc.to_expense_account || frm.doc.amount_requested) {
+        // Ensure single-transfer account fields are empty in multi-transfer mode
+        // (amount_requested is now used as total display, so exclude it from this check)
+        if (frm.doc.expense_account || frm.doc.to_expense_account) {
             frappe.msgprint(__('Please use either single-transfer fields OR multi-transfer table, not both'));
             return false;
         }
@@ -845,6 +869,49 @@ function validate_virement_request(frm) {
     }
 
     return true;
+}
+
+function handle_threshold_validation(frm) {
+    // Don't show warnings for final states or cancelled documents
+    const final_states = ['Approved', 'Rejected'];
+    if (final_states.includes(frm.doc.workflow_state) || frm.doc.docstatus === 2) {
+        clear_external_approval_message(frm);
+        return;
+    }
+
+    // Determine if this is multi-transfer or single-transfer mode
+    const is_multi_transfer = frm.doc.transfer_items && frm.doc.transfer_items.length > 0;
+
+    if (is_multi_transfer) {
+        // Multi-transfer mode - check total amount
+        let total_amount = 0;
+        frm.doc.transfer_items.forEach(function(item) {
+            if (item.amount_requested) {
+                total_amount += flt(item.amount_requested);
+            }
+        });
+
+        // Check external approval requirement for total amount
+        if (total_amount > 250000) {
+            frappe.call({
+                method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
+                args: {
+                    'action': 'validate_amount_approval',
+                    'amount': total_amount
+                },
+                callback: function(r) {
+                    if (r.message && r.message.success) {
+                        show_external_approval_message(frm, r.message);
+                    }
+                }
+            });
+        } else {
+            clear_external_approval_message(frm);
+        }
+    } else {
+        // Single-transfer mode (legacy) - use existing logic
+        handle_amount_change(frm);
+    }
 }
 
 function handle_amount_change(frm) {
@@ -985,10 +1052,27 @@ function clear_budget_insufficient_message(frm) {
 function handle_external_approval_before_save(frm) {
     // Don't automatically change workflow state - let users use action buttons
     // Just show informational messages
-    if (frm.doc.amount_requested && Math.abs(frm.doc.amount_requested) > 250000) {
+
+    // Calculate total amount based on transfer mode
+    let total_amount = 0;
+    const is_multi_transfer = frm.doc.transfer_items && frm.doc.transfer_items.length > 0;
+
+    if (is_multi_transfer) {
+        // Multi-transfer mode - sum all transfer items
+        frm.doc.transfer_items.forEach(function(item) {
+            if (item.amount_requested) {
+                total_amount += flt(item.amount_requested);
+            }
+        });
+    } else {
+        // Single-transfer mode (legacy)
+        total_amount = Math.abs(frm.doc.amount_requested || 0);
+    }
+
+    if (total_amount > 250000) {
         if (frm.doc.workflow_state === 'Draft') {
             frappe.show_alert({
-                message: __('Amount exceeds 250,000 - consider using "Submit for External Approval" action'),
+                message: __('Total amount exceeds 250,000 - consider using "Submit for External Approval" action'),
                 indicator: 'orange'
             }, 5);
         }
@@ -1143,9 +1227,9 @@ function show_approval_confirmation_dialog(frm) {
                                                 'virement_type': frm.doc.virement_type,
                                                 'budget': frm.doc.budget,
                                                 'target_budget': frm.doc.target_budget || '',
-                                                'expense_account': frm.doc.expense_account,
-                                                'to_expense_account': frm.doc.to_expense_account,
-                                                'amount_requested': frm.doc.amount_requested
+                                                'expense_account': frm.doc.expense_account || '',
+                                                'to_expense_account': frm.doc.to_expense_account || '',
+                                                'amount_requested': frm.doc.amount_requested || 0
                                             },
                                             callback: function(r) {
                                                 if (r.message && r.message.success) {
@@ -1299,9 +1383,9 @@ function process_budget_approval(frm) {
                         'virement_type': frm.doc.virement_type,
                         'budget': frm.doc.budget,
                         'target_budget': frm.doc.target_budget || '',
-                        'expense_account': frm.doc.expense_account,
-                        'to_expense_account': frm.doc.to_expense_account,
-                        'amount_requested': frm.doc.amount_requested
+                        'expense_account': frm.doc.expense_account || '',
+                        'to_expense_account': frm.doc.to_expense_account || '',
+                        'amount_requested': frm.doc.amount_requested || 0
                     },
                     callback: function(r) {
                         if (r.message && r.message.success) {
@@ -1493,11 +1577,12 @@ function show_virement_summary_dialog(frm) {
         method: 'wcfcb_zm.api.budget_request.budget_virement_handler',
         args: {
             action: 'get_summary_details',
+            doc_name: frm.doc.name,
             source_budget: frm.doc.budget,
             target_budget: frm.doc.target_budget,
             virement_type: frm.doc.virement_type,
-            from_account: frm.doc.expense_account,
-            to_account: frm.doc.to_expense_account
+            from_account: frm.doc.expense_account || '',
+            to_account: frm.doc.to_expense_account || ''
         },
         callback: function(r) {
             const details = r && r.message ? r.message : { amended_budgets: [] };
@@ -1507,23 +1592,22 @@ function show_virement_summary_dialog(frm) {
 }
 
 function show_summary_with_amendments(frm, details) {
+    // Check if this is multi-transfer mode
+    const is_multi_transfer = details && details.multi_transfer;
+
     // Data
     const transfer_type = frm.doc.virement_type;
     const amount = parseFloat(frm.doc.amount_requested).toLocaleString();
-    const from_account = frm.doc.expense_account;
-    const to_account = frm.doc.to_expense_account;
     const from_budget = frm.doc.budget;
     const to_budget = frm.doc.target_budget || from_budget;
     const originals = transfer_type === 'Inter-Budget' ? [from_budget, to_budget] : [from_budget];
 
     const amended = (details && Array.isArray(details.amended_budgets)) ? details.amended_budgets : [];
-    const fromInfo = (details && details.from) || {};
-    const toInfo = (details && details.to) || {};
     const fmt = v => (v === null || v === undefined || isNaN(Number(v))) ? '—' : `K ${Number(v).toLocaleString()}`;
 
     // Chips
     const chip = (txt, color='#e9ecef') => `<span style=\"display:inline-block;margin:2px 6px 2px 0;padding:6px 10px;border-radius:999px;background:${color};font-size:12px;\">${frappe.utils.escape_html(txt)}</span>`;
-    const linkChip = (name, color='#d4edda') => `<a href=\"#Form/Budget/${encodeURIComponent(name)}\" style=\"text-decoration:none;\">${chip(name, color)}</a>`;
+    const linkChip = (name, color='#d4edda') => `<a href=\"/app/budget/${name}\" style=\"text-decoration:none;\">${chip(name, color)}</a>`;
 
     const originalChips = originals.map(n => linkChip(n, '#eef2ff')).join('');
     const amendedChips = amended.length ? amended.map(n => linkChip(n, '#d4edda')).join('') : chip('Amendment created', '#fff3cd');
@@ -1533,6 +1617,37 @@ function show_summary_with_amendments(frm, details) {
         title: __('Budget Virement Summary'),
         size: 'large'
     });
+
+    // Generate transfer details section
+    let transferDetailsHtml = '';
+    if (is_multi_transfer && details.transfer_items && details.transfer_items.length > 0) {
+        // Multi-transfer mode: show summary of transfer items
+        const transferCount = details.transfer_items.length;
+        transferDetailsHtml = `
+            <div style="background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;padding:12px;">
+                <div style="font-weight:600;margin-bottom:8px;color:#334155;">Transfer Details</div>
+                <div style="display:flex;flex-direction:column;gap:6px;font-size:13px;color:#334155;">
+                    <div><span style="opacity:.7">Transfer Type:</span> ${frappe.utils.escape_html(transfer_type)}</div>
+                    <div><span style="opacity:.7">Number of Transfers:</span> ${transferCount}</div>
+                    <div><span style="opacity:.7">From Budget:</span> ${linkChip(from_budget, '#eef2ff')}</div>
+                    ${transfer_type === 'Inter-Budget' ? `<div><span style="opacity:.7">To Budget:</span> ${linkChip(to_budget, '#eef2ff')}</div>` : ''}
+                </div>
+            </div>`;
+    } else {
+        // Single-transfer mode: show legacy fields
+        const from_account = frm.doc.expense_account;
+        const to_account = frm.doc.to_expense_account;
+        transferDetailsHtml = `
+            <div style="background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;padding:12px;">
+                <div style="font-weight:600;margin-bottom:8px;color:#334155;">Transfer Details</div>
+                <div style="display:flex;flex-direction:column;gap:6px;font-size:13px;color:#334155;">
+                    <div><span style="opacity:.7">From Account:</span> ${frappe.utils.escape_html(from_account || '')}</div>
+                    <div><span style="opacity:.7">To Account:</span> ${frappe.utils.escape_html(to_account || '')}</div>
+                    <div><span style="opacity:.7">From Budget:</span> ${linkChip(from_budget, '#eef2ff')}</div>
+                    ${transfer_type === 'Inter-Budget' ? `<div><span style="opacity:.7">To Budget:</span> ${linkChip(to_budget, '#eef2ff')}</div>` : ''}
+                </div>
+            </div>`;
+    }
 
     const html = `
         <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Ubuntu,Arial,sans-serif;">
@@ -1545,15 +1660,7 @@ function show_summary_with_amendments(frm, details) {
             </div>
 
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-                <div style="background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;padding:12px;">
-                    <div style="font-weight:600;margin-bottom:8px;color:#334155;">Transfer Details</div>
-                    <div style="display:flex;flex-direction:column;gap:6px;font-size:13px;color:#334155;">
-                        <div><span style="opacity:.7">From Account:</span> ${frappe.utils.escape_html(from_account || '')}</div>
-                        <div><span style="opacity:.7">To Account:</span> ${frappe.utils.escape_html(to_account || '')}</div>
-                        <div><span style="opacity:.7">From Budget:</span> ${linkChip(from_budget, '#eef2ff')}</div>
-                        ${transfer_type === 'Inter-Budget' ? `<div><span style="opacity:.7">To Budget:</span> ${linkChip(to_budget, '#eef2ff')}</div>` : ''}
-                    </div>
-                </div>
+                ${transferDetailsHtml}
 
                 <div style="background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;padding:12px;">
                     <div style="font-weight:600;margin-bottom:8px;color:#334155;">Budget Changes</div>
@@ -1567,30 +1674,63 @@ function show_summary_with_amendments(frm, details) {
 
             <div style="background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;padding:12px;margin-top:12px;">
                 <div style="font-weight:600;margin-bottom:8px;color:#334155;">Amounts (Before → After)</div>
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-                    <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:12px;">
-                        <div style="font-weight:600;margin-bottom:6px;color:#334155;">From Account</div>
-                        <div style="font-size:13px;color:#334155;">
-                            <div style="opacity:.7">${frappe.utils.escape_html(from_account || '')} (${frappe.utils.escape_html(fromInfo.budget || from_budget)})</div>
-                            <div style="margin-top:6px;display:flex;align-items:center;gap:8px;">
-                                <span>${fmt(fromInfo.before)}</span>
-                                <i class="fa fa-long-arrow-right" style="opacity:.6"></i>
-                                <span style="font-weight:600;color:#b91c1c;">${fmt(fromInfo.after)}</span>
+                ${is_multi_transfer && details.transfer_items ?
+                    // Multi-transfer mode: show each transfer item
+                    details.transfer_items.map((item, index) => `
+                        <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-bottom:8px;">
+                            <div style="font-weight:600;margin-bottom:8px;color:#334155;">Transfer ${index + 1} - K ${Number(item.amount).toLocaleString()}</div>
+                            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                                <div>
+                                    <div style="font-weight:600;margin-bottom:6px;color:#334155;">From Account</div>
+                                    <div style="font-size:13px;color:#334155;">
+                                        <div style="opacity:.7">${frappe.utils.escape_html(item.from.account || '')} (${frappe.utils.escape_html(item.from.budget || '')})</div>
+                                        <div style="margin-top:6px;display:flex;align-items:center;gap:8px;">
+                                            <span>${fmt(item.from.before)}</span>
+                                            <i class="fa fa-long-arrow-right" style="opacity:.6"></i>
+                                            <span style="font-weight:600;color:#b91c1c;">${fmt(item.from.after)}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <div style="font-weight:600;margin-bottom:6px;color:#334155;">To Account</div>
+                                    <div style="font-size:13px;color:#334155;">
+                                        <div style="opacity:.7">${frappe.utils.escape_html(item.to.account || '')} (${frappe.utils.escape_html(item.to.budget || '')})</div>
+                                        <div style="margin-top:6px;display:flex;align-items:center;gap:8px;">
+                                            <span>${fmt(item.to.before)}</span>
+                                            <i class="fa fa-long-arrow-right" style="opacity:.6"></i>
+                                            <span style="font-weight:600;color:#166534;">${fmt(item.to.after)}</span>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
-                    </div>
-                    <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:12px;">
-                        <div style="font-weight:600;margin-bottom:6px;color:#334155;">To Account</div>
-                        <div style="font-size:13px;color:#334155;">
-                            <div style="opacity:.7">${frappe.utils.escape_html(to_account || '')} (${frappe.utils.escape_html(toInfo.budget || to_budget)})</div>
-                            <div style="margin-top:6px;display:flex;align-items:center;gap:8px;">
-                                <span>${fmt(toInfo.before)}</span>
-                                <i class="fa fa-long-arrow-right" style="opacity:.6"></i>
-                                <span style="font-weight:600;color:#166534;">${fmt(toInfo.after)}</span>
+                    `).join('') :
+                    // Single-transfer mode: show legacy format
+                    `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                        <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:12px;">
+                            <div style="font-weight:600;margin-bottom:6px;color:#334155;">From Account</div>
+                            <div style="font-size:13px;color:#334155;">
+                                <div style="opacity:.7">${frappe.utils.escape_html(details.from?.account || '')} (${frappe.utils.escape_html(details.from?.budget || from_budget)})</div>
+                                <div style="margin-top:6px;display:flex;align-items:center;gap:8px;">
+                                    <span>${fmt(details.from?.before)}</span>
+                                    <i class="fa fa-long-arrow-right" style="opacity:.6"></i>
+                                    <span style="font-weight:600;color:#b91c1c;">${fmt(details.from?.after)}</span>
+                                </div>
                             </div>
                         </div>
-                    </div>
-                </div>
+                        <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:12px;">
+                            <div style="font-weight:600;margin-bottom:6px;color:#334155;">To Account</div>
+                            <div style="font-size:13px;color:#334155;">
+                                <div style="opacity:.7">${frappe.utils.escape_html(details.to?.account || '')} (${frappe.utils.escape_html(details.to?.budget || to_budget)})</div>
+                                <div style="margin-top:6px;display:flex;align-items:center;gap:8px;">
+                                    <span>${fmt(details.to?.before)}</span>
+                                    <i class="fa fa-long-arrow-right" style="opacity:.6"></i>
+                                    <span style="font-weight:600;color:#166534;">${fmt(details.to?.after)}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>`
+                }
             </div>
 
             <div style="background:#f1f5f9;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-top:12px;">
@@ -1692,14 +1832,30 @@ function show_approval_summary_dialog(frm, response_data) {
 }
 
 function force_multi_transfer_mode(frm) {
-    // Hide single-transfer fields for new requests
+    console.log('Forcing multi-transfer mode for ALL requests');
+
+    // ALWAYS hide single-transfer account fields
     frm.set_df_property('expense_account', 'hidden', 1);
     frm.set_df_property('to_expense_account', 'hidden', 1);
-    frm.set_df_property('amount_requested', 'hidden', 1);
+    frm.refresh_field('expense_account');
+    frm.refresh_field('to_expense_account');
 
-    // Show multi-transfer section
+    // ALWAYS show amount_requested as read-only total amount field
+    frm.set_df_property('amount_requested', 'hidden', 0);
+    frm.set_df_property('amount_requested', 'read_only', 1);
+    frm.set_df_property('amount_requested', 'label', 'Total Transfer Amount');
+
+    // ALWAYS show multi-transfer section
     frm.set_df_property('multi_transfer_section', 'hidden', 0);
     frm.set_df_property('transfer_items', 'hidden', 0);
+
+    // Calculate and set initial total
+    calculate_total_transfer_amount(frm);
+
+    // Force refresh of the amount field to apply properties
+    frm.refresh_field('amount_requested');
+
+    console.log('Multi-transfer mode setup complete');
 
     // Add a helpful message
     if (!frm.doc.transfer_items || frm.doc.transfer_items.length === 0) {

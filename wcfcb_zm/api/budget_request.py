@@ -58,12 +58,13 @@ def budget_virement_handler(action, **kwargs):
             frappe.response['message'] = result
             return result
         elif action == 'get_summary_details':
+            doc_name = kwargs.get('doc_name')
             source_budget = kwargs.get('source_budget')
             target_budget = kwargs.get('target_budget')
             virement_type = kwargs.get('virement_type')
             from_account = kwargs.get('from_account') or kwargs.get('expense_account')
             to_account = kwargs.get('to_account') or kwargs.get('to_expense_account')
-            result = get_summary_details(source_budget, target_budget, virement_type, from_account, to_account)
+            result = get_summary_details(source_budget, target_budget, virement_type, from_account, to_account, doc_name)
             frappe.response['message'] = result
             return result
 
@@ -158,15 +159,19 @@ def get_account_balance_from_budget(budget_name, account):
         }
 
 @frappe.whitelist()
-def get_budget_accounts(budget, exclude_account=None):
-    """Get accounts within a budget, optionally excluding one account"""
+def get_budget_accounts(doctype=None, txt=None, searchfield=None, start=None, page_len=None, filters=None):
+    """Get accounts within a budget, optionally excluding one account - compatible with Frappe search widget"""
     try:
-        if not budget:
-            frappe.response['message'] = {
-                'success': False,
-                'message': 'Budget parameter is required'
-            }
-            return
+        # Parse filters if it's a string (from search widget)
+        if isinstance(filters, str):
+            import json
+            filters = json.loads(filters)
+
+        if not filters or not filters.get('budget'):
+            return []
+
+        budget = filters.get('budget')
+        exclude_account = filters.get('exclude_account')
 
         if exclude_account:
             accounts = frappe.db.sql("""
@@ -180,9 +185,17 @@ def get_budget_accounts(budget, exclude_account=None):
                 WHERE
                     ba.parent = %(budget)s
                     AND ba.account != %(exclude_account)s
+                    AND (%(txt)s = '' OR acc.account_name LIKE %(txt)s OR ba.account LIKE %(txt)s)
                 ORDER BY
                     acc.account_name
-            """, {'budget': budget, 'exclude_account': exclude_account}, as_dict=True)
+                LIMIT %(start)s, %(page_len)s
+            """, {
+                'budget': budget,
+                'exclude_account': exclude_account,
+                'txt': f'%{txt}%' if txt else '',
+                'start': start or 0,
+                'page_len': page_len or 20
+            }, as_dict=True)
         else:
             accounts = frappe.db.sql("""
                 SELECT
@@ -194,20 +207,23 @@ def get_budget_accounts(budget, exclude_account=None):
                     `tabAccount` acc ON ba.account = acc.name
                 WHERE
                     ba.parent = %(budget)s
+                    AND (%(txt)s = '' OR acc.account_name LIKE %(txt)s OR ba.account LIKE %(txt)s)
                 ORDER BY
                     acc.account_name
-            """, {'budget': budget}, as_dict=True)
+                LIMIT %(start)s, %(page_len)s
+            """, {
+                'budget': budget,
+                'txt': f'%{txt}%' if txt else '',
+                'start': start or 0,
+                'page_len': page_len or 20
+            }, as_dict=True)
 
-        frappe.response['message'] = {
-            'success': True,
-            'data': accounts
-        }
+        # Return in the format expected by search widget
+        return [[account.value, account.description] for account in accounts]
 
     except Exception as e:
-        frappe.response['message'] = {
-            'success': False,
-            'message': 'Error fetching budget accounts: ' + str(e)
-        }
+        frappe.log_error(f"Error in get_budget_accounts: {str(e)}")
+        return []
 
 def get_target_budgets(virement_type, source_budget=None):
     """Get target budgets based on virement type and source budget"""
@@ -425,12 +441,21 @@ def process_approval_with_amendment(doc_name, virement_type, budget, target_budg
     try:
         # Parameters are being received correctly - debug logging removed
 
-        # Validate inputs - target_budget is optional for Intra-Budget
-        required_params = [doc_name, virement_type, budget, expense_account, to_expense_account, amount_requested]
-        missing_params = []
+        # Validate inputs - check if this is multi-transfer mode first
+        budget_request = frappe.get_doc("Budget Request", doc_name)
+        is_multi_transfer = is_multi_transfer_mode(doc_name)
 
-        for i, param in enumerate(required_params):
+        if is_multi_transfer:
+            # For multi-transfer mode, only validate basic params
+            required_params = [doc_name, virement_type, budget]
+            param_names = ['doc_name', 'virement_type', 'budget']
+        else:
+            # For single-transfer mode, validate legacy fields
+            required_params = [doc_name, virement_type, budget, expense_account, to_expense_account, amount_requested]
             param_names = ['doc_name', 'virement_type', 'budget', 'expense_account', 'to_expense_account', 'amount_requested']
+
+        missing_params = []
+        for i, param in enumerate(required_params):
             if param is None or str(param).strip() == '' or str(param).strip() == 'None':
                 missing_params.append(param_names[i])
 
@@ -441,8 +466,7 @@ def process_approval_with_amendment(doc_name, virement_type, budget, target_budg
             }
             return
 
-        # STEP 1: Get Budget Request document and validate it's approved
-        budget_request = frappe.get_doc("Budget Request", doc_name)
+        # STEP 1: Validate Budget Request state (budget_request already loaded above)
         current_state = budget_request.workflow_state
 
         # STEP 1.1: Check if Budget Request is approved before proceeding with amendment
@@ -919,7 +943,7 @@ def get_amended_budgets(source_budget, target_budget=None, virement_type=None):
         return []
 
 
-def get_summary_details(source_budget, target_budget=None, virement_type=None, from_account=None, to_account=None):
+def get_summary_details(source_budget, target_budget=None, virement_type=None, from_account=None, to_account=None, doc_name=None):
     """Return before/after amounts for involved accounts and latest amended budgets"""
     try:
         def get_amount(budget_name, account_name):
@@ -948,11 +972,76 @@ def get_summary_details(source_budget, target_budget=None, virement_type=None, f
             )
             return rows[0].name if rows else None
 
-        result = {
-            'amended_budgets': [],
-            'from': {'budget': source_budget, 'account': from_account, 'before': None, 'after': None},
-            'to': {'budget': target_budget or source_budget, 'account': to_account, 'before': None, 'after': None},
-        }
+        # Check if this is multi-transfer mode
+        is_multi_transfer = doc_name and is_multi_transfer_mode(doc_name)
+
+        if is_multi_transfer:
+            # Get transfer items for multi-transfer mode
+            budget_request = frappe.get_doc("Budget Request", doc_name)
+            transfer_items = budget_request.transfer_items or []
+
+            # Build result for multi-transfer mode
+            result = {
+                'amended_budgets': [],
+                'multi_transfer': True,
+                'transfer_items': []
+            }
+
+            # Get amended budgets
+            if virement_type == 'Intra-Budget':
+                amended = latest_amended(source_budget)
+                result['amended_budgets'] = [amended] if amended else []
+            elif virement_type == 'Inter-Budget':
+                amended_source = latest_amended(source_budget)
+                amended_target = latest_amended(target_budget) if target_budget else None
+                result['amended_budgets'] = [n for n in [amended_source, amended_target] if n]
+
+            # Process each transfer item
+            for item in transfer_items:
+                from_acc = item.from_account
+                to_acc = item.to_account
+                amount = item.amount_requested
+
+                # Determine which budgets to use based on virement type
+                if virement_type == "Inter-Budget":
+                    from_budget = source_budget
+                    to_budget = target_budget
+                    from_amended = latest_amended(source_budget)
+                    to_amended = latest_amended(target_budget) if target_budget else None
+                else:
+                    # Intra-Budget: both accounts in same budget
+                    from_budget = source_budget
+                    to_budget = source_budget
+                    from_amended = latest_amended(source_budget)
+                    to_amended = from_amended
+
+                transfer_summary = {
+                    'amount': amount,
+                    'from': {
+                        'budget': from_budget,
+                        'account': from_acc,
+                        'before': get_amount(from_budget, from_acc),
+                        'after': get_amount(from_amended, from_acc) if from_amended else None
+                    },
+                    'to': {
+                        'budget': to_budget,
+                        'account': to_acc,
+                        'before': get_amount(to_budget, to_acc),
+                        'after': get_amount(to_amended, to_acc) if to_amended else None
+                    }
+                }
+                result['transfer_items'].append(transfer_summary)
+
+            return result
+
+        else:
+            # Legacy single-transfer mode
+            result = {
+                'amended_budgets': [],
+                'multi_transfer': False,
+                'from': {'budget': source_budget, 'account': from_account, 'before': None, 'after': None},
+                'to': {'budget': target_budget or source_budget, 'account': to_account, 'before': None, 'after': None},
+            }
 
         if virement_type == 'Intra-Budget':
             amended = latest_amended(source_budget)
