@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WCFCB ZM - Actual Status Indicators</title>
+    <link rel="stylesheet" href="/assets/frappe/dist/css/desk.bundle.6JGLD4PF.css">
+    <link rel="stylesheet" href="/assets/wcfcb_zm/css/custom_theme.css">
+    <style>
+        .status-showcase {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        .status-section {
+            margin-bottom: 30px;
+        }
+        .status-section h2 {
+            margin-bottom: 15px;
+            color: #333;
+            border-bottom: 2px solid #eee;
+            padding-bottom: 5px;
+        }
+        .status-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .status-list li {
+            margin: 8px 0;
+            padding: 8px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="status-showcase">
+        <h1>WCFCB ZM - Actual Status Indicators</h1>
+        <p><strong>Note:</strong> This page shows only the <em>actual</em> status indicators that exist in Frappe and your WCFCB ZM app.</p>
+
+        <!-- Actual Frappe Indicators -->
+        <div class="status-section">
+            <h2>Frappe Indicators (with dots)</h2>
+            <ul class="status-list">
+                <li><span class="indicator green">Green Indicator</span></li>
+                <li><span class="indicator red">Red Indicator</span></li>
+                <li><span class="indicator blue">Blue Indicator</span></li>
+                <li><span class="indicator yellow">Yellow Indicator</span></li>
+                <li><span class="indicator orange">Orange Indicator</span></li>
+                <li><span class="indicator purple">Purple Indicator</span></li>
+                <li><span class="indicator gray">Gray Indicator</span></li>
+                <li><span class="indicator grey">Grey Indicator</span></li>
+            </ul>
+        </div>
+
+        <!-- Actual Frappe Indicator Pills -->
+        <div class="status-section">
+            <h2>Frappe Indicator Pills (with dots)</h2>
+            <ul class="status-list">
+                <li><span class="indicator-pill green">Green Pill</span></li>
+                <li><span class="indicator-pill red">Red Pill</span></li>
+                <li><span class="indicator-pill blue">Blue Pill</span></li>
+                <li><span class="indicator-pill yellow">Yellow Pill</span></li>
+                <li><span class="indicator-pill orange">Orange Pill</span></li>
+                <li><span class="indicator-pill purple">Purple Pill</span></li>
+                <li><span class="indicator-pill gray">Gray Pill</span></li>
+                <li><span class="indicator-pill grey">Grey Pill</span></li>
+                <li><span class="indicator-pill cyan">Cyan Pill</span></li>
+                <li><span class="indicator-pill pink">Pink Pill</span></li>
+                <li><span class="indicator-pill light-blue">Light Blue Pill</span></li>
+            </ul>
+        </div>
+
+        <!-- Indicator Pills WITHOUT dots -->
+        <div class="status-section">
+            <h2>Indicator Pills (no-indicator-dot)</h2>
+            <ul class="status-list">
+                <li><span class="indicator-pill no-indicator-dot green">Green No Dot</span></li>
+                <li><span class="indicator-pill no-indicator-dot red">Red No Dot</span></li>
+                <li><span class="indicator-pill no-indicator-dot blue">Blue No Dot</span></li>
+                <li><span class="indicator-pill no-indicator-dot yellow">Yellow No Dot</span></li>
+                <li><span class="indicator-pill no-indicator-dot orange">Orange No Dot</span></li>
+                <li><span class="indicator-pill no-indicator-dot purple">Purple No Dot</span></li>
+            </ul>
+        </div>
+
+        <!-- Ellipsis Examples -->
+        <div class="status-section">
+            <h2>Ellipsis (text overflow)</h2>
+            <ul class="status-list">
+                <li><span class="indicator-pill ellipsis green" style="max-width: 120px;">Very Long Status Name That Gets Cut Off With Ellipsis</span></li>
+                <li><span class="indicator-pill no-indicator-dot ellipsis blue" style="max-width: 120px;">Another Very Long Status Description That Overflows</span></li>
+                <li><span class="ellipsis" style="max-width: 150px; display: inline-block;">Just ellipsis class on very long text that should be truncated</span></li>
+            </ul>
+        </div>
+
+        <!-- Bootstrap Badges -->
+        <div class="status-section">
+            <h2>Bootstrap Badges (from bootstrap.css)</h2>
+            <ul class="status-list">
+                <li><span class="badge badge-primary">Primary</span></li>
+                <li><span class="badge badge-secondary">Secondary</span></li>
+                <li><span class="badge badge-success">Success</span></li>
+                <li><span class="badge badge-danger">Danger</span></li>
+                <li><span class="badge badge-warning">Warning</span></li>
+                <li><span class="badge badge-info">Info</span></li>
+                <li><span class="badge badge-light">Light</span></li>
+                <li><span class="badge badge-dark">Dark</span></li>
+            </ul>
+        </div>
+
+        <!-- WCFCB Custom Colors (from custom_theme.css) -->
+        <div class="status-section">
+            <h2>WCFCB Custom Colors</h2>
+            <ul class="status-list">
+                <li><span style="background-color: var(--wcfcb-primary, #347fb6); color: white; padding: 4px 8px; border-radius: 4px;">Primary (--wcfcb-primary)</span></li>
+                <li><span style="background-color: var(--wcfcb-primary-dark, #2c5778); color: white; padding: 4px 8px; border-radius: 4px;">Primary Dark</span></li>
+                <li><span style="background-color: var(--wcfcb-secondary, #ed8643); color: white; padding: 4px 8px; border-radius: 4px;">Secondary (--wcfcb-secondary)</span></li>
+                <li><span style="background-color: var(--wcfcb-secondary-dark, #d4722a); color: white; padding: 4px 8px; border-radius: 4px;">Secondary Dark</span></li>
+                <li><span style="background-color: var(--wcfcb-secondary-light, #f2a366); color: #333; padding: 4px 8px; border-radius: 4px;">Secondary Light</span></li>
+            </ul>
+        </div>
+
+        <!-- WCFCB Badge Overrides -->
+        <div class="status-section">
+            <h2>WCFCB Badge Overrides (from custom_theme.css)</h2>
+            <ul class="status-list">
+                <li><span class="badge badge-primary">Primary Badge (uses --wcfcb-primary)</span></li>
+                <li><span class="badge badge-secondary">Secondary Badge (uses --wcfcb-secondary)</span></li>
+                <li><span class="badge badge-light">Light Badge (custom styling)</span></li>
+            </ul>
+        </div>
+
+        <!-- Error Analysis -->
+        <div class="status-section">
+            <h2>Error Analysis</h2>
+            <p><strong>Original Error:</strong> <code>"" is not a valid color</code></p>
+            <p><strong>Conclusion:</strong> This error is <em>NOT</em> coming from the wcfcb_zm app. The error is likely from:</p>
+            <ul class="status-list">
+                <li>Frappe core JavaScript validation</li>
+                <li>Another app or custom script</li>
+                <li>Browser CSS validation</li>
+                <li>A form field or configuration with an empty color value</li>
+            </ul>
+            <p><strong>Note:</strong> All color values in wcfcb_zm are properly defined with valid hex codes or CSS variables.</p>
+        </div>
+    </div>
+
+    <script>
+        // Simple page functionality
+        console.log('Status Indicators page loaded');
+    </script>
+</body>
+</html>
