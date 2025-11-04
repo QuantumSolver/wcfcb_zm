@@ -14,20 +14,25 @@ frappe.ui.form.on('Budget Request', {
         // Add View Summary button for approved requests
         add_view_summary_button(frm);
 
-        // Initialize modern card-based transfer items interface for all document states
+        // Initialize modern card-based transfer items interface ONLY if budget is selected
         // But only allow editing for draft documents
-        initialize_modern_transfer_interface(frm);
+        if (frm.doc.budget) {
+            initialize_modern_transfer_interface(frm);
 
-        // Ensure cards interface is maintained on refresh
-        setTimeout(() => {
-            if ($('.modern-transfer-cards-container').length === 0) {
-                initialize_modern_transfer_interface(frm);
+            // Ensure cards interface is maintained on refresh
+            setTimeout(() => {
+                if ($('.modern-transfer-cards-container').length === 0) {
+                    initialize_modern_transfer_interface(frm);
+                }
+            }, 100);
+
+            // Add accordion-style progressive summary (for multi-transfer mode)
+            if (is_multi_transfer_mode(frm)) {
+                add_accordion_progressive_summary(frm);
             }
-        }, 100);
-
-        // Add accordion-style progressive summary (for multi-transfer mode)
-        if (is_multi_transfer_mode(frm)) {
-            add_accordion_progressive_summary(frm);
+        } else {
+            // Hide transfer cards container if no budget is selected
+            hide_transfer_cards_container();
         }
     },
 
@@ -51,6 +56,17 @@ frappe.ui.form.on('Budget Request', {
         handle_budget_change(frm);
         // Refresh account filters when budget changes
         setup_transfer_item_filters(frm);
+
+        // Show/hide transfer cards based on budget selection
+        if (frm.doc.budget) {
+            initialize_modern_transfer_interface(frm);
+            // Add accordion-style progressive summary if in multi-transfer mode
+            if (is_multi_transfer_mode(frm)) {
+                add_accordion_progressive_summary(frm);
+            }
+        } else {
+            hide_transfer_cards_container();
+        }
     },
 
     target_budget: function(frm) {
@@ -576,9 +592,15 @@ function calculate_client_side_progressive_balances(frm, up_to_row_idx, target_b
 
 function add_accordion_progressive_summary(frm) {
     // Add accordion-style progressive summary after transfer items table
+    // Try immediate creation first
+    create_accordion_progressive_summary(frm);
+
+    // Also add a small delay as fallback to ensure DOM is ready
     setTimeout(() => {
-        create_accordion_progressive_summary(frm);
-    }, 500); // Delay to ensure DOM is ready
+        if (!frm._accordion_summary_visible) {
+            create_accordion_progressive_summary(frm);
+        }
+    }, 100); // Reduced delay for faster response
 }
 
 function create_accordion_progressive_summary(frm) {
@@ -918,6 +940,16 @@ function initialize_modern_transfer_interface(frm) {
 
     // Load existing transfer items into cards
     refresh_transfer_cards(frm);
+
+    // Add accordion progressive summary immediately if there are transfer items
+    if (is_multi_transfer_mode(frm)) {
+        add_accordion_progressive_summary(frm);
+    }
+}
+
+function hide_transfer_cards_container() {
+    // Hide the modern transfer cards container when no budget is selected
+    $('.modern-transfer-cards-container').hide();
 }
 
 function create_modern_transfer_cards_container(frm) {
@@ -975,8 +1007,19 @@ function add_new_transfer_card(frm) {
     // Add a new transfer item to the backend table
     let new_row = frappe.model.add_child(frm.doc, 'Budget Request Item', 'transfer_items');
 
+    // Mark form as dirty to show save button
+    frm.dirty();
+
     // Refresh the cards display
     refresh_transfer_cards(frm);
+
+    // Add accordion summary if not present (for first transfer item)
+    if (!frm._accordion_summary_visible) {
+        add_accordion_progressive_summary(frm);
+    }
+
+    // Check threshold validation after adding new card
+    handle_threshold_validation(frm);
 
     // Focus on the new card
     setTimeout(() => {
@@ -1281,6 +1324,8 @@ function bind_card_events(frm, idx) {
             refresh_single_card(frm, idx);
             update_card_balance_displays(frm, idx);
             refresh_inline_summary_if_visible(frm);
+            // Mark form as dirty to show save button
+            frm.dirty();
         }
     });
 
@@ -1293,6 +1338,8 @@ function bind_card_events(frm, idx) {
             refresh_single_card(frm, idx);
             update_card_balance_displays(frm, idx);
             refresh_inline_summary_if_visible(frm);
+            // Mark form as dirty to show save button
+            frm.dirty();
         }
     });
 
@@ -1305,6 +1352,10 @@ function bind_card_events(frm, idx) {
             refresh_all_cards_after_index(frm, get_item_index(frm, idx));
             update_card_balance_displays(frm, idx);
             refresh_inline_summary_if_visible(frm);
+            // Check threshold validation in real-time
+            handle_threshold_validation(frm);
+            // Mark form as dirty to show save button
+            frm.dirty();
         }
     });
 
@@ -1357,6 +1408,9 @@ function remove_transfer_card(frm, idx) {
 
         // Refresh all cards
         refresh_transfer_cards(frm);
+
+        // Check threshold validation after removal
+        handle_threshold_validation(frm);
 
         // Update form
         frm.dirty();
