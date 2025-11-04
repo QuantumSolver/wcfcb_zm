@@ -47,7 +47,9 @@ doctype_list_js = {
 
 # Client scripts for specific doctypes
 doctype_js = {
-    "Budget Request": "wcfcb_zm/public/js/budget_request.js"
+    "Budget Request": "public/js/budget_request.js",
+    "Material Request": "public/js/material_request.js",
+    "Purchase Order": "public/js/purchase_order.js"
 }
 
 # Svg Icons

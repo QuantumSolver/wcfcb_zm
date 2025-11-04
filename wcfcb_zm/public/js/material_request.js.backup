@@ -1,0 +1,747 @@
+// Console log to confirm script loading
+console.log('🚀 WCFCB Budget Check Script Loading...');
+
+frappe.ui.form.on('Material Request', {
+    refresh: function(frm) {
+        console.log('🔄 Material Request refresh event triggered');
+
+        // Add inline message to confirm script is loading
+        frm.dashboard.add_comment(__('✅ Budget Check Script Loaded Successfully!'), 'blue', true);
+
+        // Show a prominent message
+        frappe.show_alert({
+            message: __('Budget Check Script Active'),
+            indicator: 'green'
+        }, 5);
+
+        // Add Check Budget button
+        if (frm.fields_dict.items) {
+            // Store button reference on form
+            frm.budget_button = frm.fields_dict.items.grid.add_custom_button(
+                __('Check Budget'),
+                function() {
+                    if (validateRequiredFields(frm)) {
+                        checkAllItemsBudget(frm).then(() => {
+                            updateBudgetButtonStatus(frm);
+                        });
+                    }
+                }
+            ).addClass('btn-primary');
+
+            // Set initial button state
+            updateBudgetButtonStatus(frm);
+
+            // Show warning if any items missing expense accounts
+            showMissingAccountWarnings(frm);
+        }
+    },
+
+    validate: function(frm) {
+        return validateBudgetBeforeSave(frm);
+    },
+
+    items_add: function(frm, cdt, cdn) {
+        checkItemBudget(frm, cdt, cdn);
+        updateBudgetButtonStatus(frm);
+        showMissingAccountWarnings(frm);
+    },
+
+    items_remove: function(frm, cdt, cdn) {
+        updateBudgetButtonStatus(frm);
+    },
+
+    expense_account: function(frm, cdt, cdn) {
+        checkItemBudget(frm, cdt, cdn);
+        updateBudgetButtonStatus(frm);
+        showMissingAccountWarnings(frm);
+    },
+
+    cost_center: function(frm, cdt, cdn) {
+        checkItemBudget(frm, cdt, cdn);
+        updateBudgetButtonStatus(frm);
+    },
+
+    project: function(frm, cdt, cdn) {
+        checkItemBudget(frm, cdt, cdn);
+        updateBudgetButtonStatus(frm);
+    }
+});
+
+// ========== HELPER FUNCTIONS ========== //
+
+function validateRequiredFields(frm) {
+    if (!frm.doc.items || frm.doc.items.length === 0) {
+        frappe.msgprint({
+            title: __('Validation Error'),
+            message: __('Please add at least one item before checking budget.'),
+            indicator: 'red'
+        });
+        return false;
+    }
+
+    let invalidItems = [];
+    frm.doc.items.forEach((item, index) => {
+        if (!item.expense_account) {
+            invalidItems.push({
+                row: index + 1,
+                issue: __('missing expense account')
+            });
+        }
+
+        if (!item.cost_center && !item.project) {
+            invalidItems.push({
+                row: index + 1,
+                issue: __('missing cost center or project')
+            });
+        }
+    });
+
+    if (invalidItems.length > 0) {
+        let errorMessage = __('The following items have issues:') + '<br><br>';
+        errorMessage += invalidItems.map(item =>
+            __('Row {0}: {1}', [item.row, item.issue])
+        ).join('<br>');
+
+        frappe.msgprint({
+            title: __('Validation Error'),
+            message: errorMessage,
+            indicator: 'red'
+        });
+        return false;
+    }
+
+    return true;
+}
+
+function showMissingAccountWarnings(frm) {
+    if (!frm.doc.items) return;
+
+    let missingAccounts = frm.doc.items.filter(item => !item.expense_account);
+    if (missingAccounts.length > 0) {
+        let warning = __('Some items are missing expense accounts:') + ' ';
+        warning += missingAccounts.map(item => item.idx).join(', ');
+
+        frappe.show_alert({
+            message: warning,
+            indicator: 'orange',
+            timeout: 10
+        });
+    }
+}
+
+function updateBudgetButtonStatus(frm) {
+    if (!frm.budget_button) return;
+
+    checkOverallBudgetStatus(frm).then(status => {
+        if (status === 'within') {
+            frm.budget_button
+                .removeClass('btn-primary btn-danger')
+                .addClass('btn-info')
+                .text(__('Check Budget'));
+        } else if (status === 'exceeded') {
+            frm.budget_button
+                .removeClass('btn-primary btn-info')
+                .addClass('btn-danger')
+                .text(__('Check Budget'));
+        } else {
+            frm.budget_button
+                .removeClass('btn-info btn-danger')
+                .addClass('btn-primary')
+                .text(__('Check Budget'));
+        }
+    });
+}
+
+function checkOverallBudgetStatus(frm) {
+    return new Promise((resolve) => {
+        if (!frm.doc.items || frm.doc.items.length === 0) {
+            resolve('neutral');
+            return;
+        }
+
+        let validationPromises = [];
+        let hasValidItems = false;
+
+        frm.doc.items.forEach(item => {
+            if (item.expense_account && (item.cost_center || item.project)) {
+                hasValidItems = true;
+                validationPromises.push(
+                    validateItemBudget(
+                        item.expense_account,
+                        item.cost_center,
+                        item.project,
+                        item.amount || 0
+                    )
+                );
+            }
+        });
+
+        if (!hasValidItems) {
+            resolve('neutral');
+            return;
+        }
+
+        Promise.all(validationPromises)
+            .then(results => {
+                const anyExceeded = results.some(r => r.budget_exceeded);
+                resolve(anyExceeded ? 'exceeded' : 'within');
+            })
+            .catch(() => resolve('neutral'));
+    });
+}
+
+function validateBudgetBeforeSave(frm) {
+    return new Promise((resolve, reject) => {
+        if (!validateRequiredFields(frm)) {
+            reject('Validation failed');
+            return;
+        }
+
+        let groupedItems = {};
+        let validationPromises = [];
+
+        frm.doc.items.forEach(function(item) {
+            let key = item.expense_account + '|' + (item.cost_center || item.project);
+            if (!groupedItems[key]) {
+                groupedItems[key] = {
+                    expense_account: item.expense_account,
+                    cost_center: item.cost_center,
+                    project: item.project,
+                    total_amount: 0,
+                    items: []
+                };
+            }
+            groupedItems[key].total_amount += (item.amount || 0);
+            groupedItems[key].items.push(item);
+        });
+
+        Object.keys(groupedItems).forEach(key => {
+            let group = groupedItems[key];
+            validationPromises.push(
+                validateItemBudget(group.expense_account, group.cost_center, group.project, group.total_amount)
+            );
+        });
+
+        Promise.all(validationPromises)
+            .then(results => {
+                let budgetExceeded = false;
+                let errorMessages = [];
+                let monthlyWarnings = [];
+
+                results.forEach((result, index) => {
+                    if (result.error) {
+                        errorMessages.push(result.error);
+                        budgetExceeded = true;
+                    } else if (result.budget_exceeded) {
+                        budgetExceeded = true;
+                        errorMessages.push(result.message);
+                    }
+
+                    // Collect monthly budget warnings (non-blocking)
+                    if (result.monthly_warning && result.monthly_message) {
+                        monthlyWarnings.push(result.monthly_message);
+                    }
+                });
+
+                if (budgetExceeded) {
+                    frappe.msgprint({
+                        title: __('Budget Validation Failed'),
+                        message: errorMessages.join('<br><br>'),
+                        indicator: 'red'
+                    });
+                    reject('Budget validation failed');
+                } else {
+                    // Show success message
+                    frappe.show_alert({
+                        message: __('Budget validation passed'),
+                        indicator: 'green'
+                    });
+
+                    // Show monthly budget warnings if any (non-blocking)
+                    if (monthlyWarnings.length > 0) {
+                        frappe.msgprint({
+                            title: __('Monthly Budget Warnings'),
+                            message: __('The following monthly budget warnings were found:') + '<br><br>' + monthlyWarnings.join('<br><br>'),
+                            indicator: 'orange'
+                        });
+                    }
+
+                    resolve();
+                }
+            })
+            .catch(error => {
+                frappe.msgprint({
+                    title: __('Validation Error'),
+                    message: __('Error during budget validation: ') + error,
+                    indicator: 'red'
+                });
+                reject(error);
+            });
+    });
+}
+
+function validateItemBudget(expense_account, cost_center, project, requested_amount) {
+    return new Promise((resolve) => {
+        // Run both budget checks in parallel
+        Promise.all([
+            checkMainBudget(expense_account, cost_center, project, requested_amount),
+            checkMonthlyDistributionBudget(expense_account, cost_center, project, requested_amount)
+        ]).then(results => {
+            const [mainBudgetResult, monthlyBudgetResult] = results;
+
+            // Combine results - main budget check takes precedence for blocking
+            let combinedResult = {
+                budget_exceeded: mainBudgetResult.budget_exceeded,
+                available_budget: mainBudgetResult.available_budget,
+                requested_amount: requested_amount,
+                monthly_warning: monthlyBudgetResult.monthly_exceeded || false,
+                monthly_message: monthlyBudgetResult.message || null
+            };
+
+            // If main budget has error, use that
+            if (mainBudgetResult.error) {
+                combinedResult.error = mainBudgetResult.error;
+            }
+            // If main budget is fine but has message, use that
+            else if (mainBudgetResult.message) {
+                combinedResult.message = mainBudgetResult.message;
+            }
+
+            resolve(combinedResult);
+        }).catch(error => {
+            resolve({
+                error: __('Error checking budget for expense account: ') + expense_account
+            });
+        });
+    });
+}
+
+function checkMainBudget(expense_account, cost_center, project, requested_amount) {
+    return new Promise((resolve) => {
+        frappe.call({
+            method: 'wcfcb_zm.api.material_request.check_budget',
+            args: {
+                'expense_account': expense_account,
+                'cost_center': cost_center,
+                'project': project
+            },
+            callback: function(r) {
+                if (r.exc) {
+                    resolve({
+                        error: __('Error checking budget for expense account: ') + expense_account
+                    });
+                    return;
+                }
+
+                if (r.message && r.message.length > 0) {
+                    let budget_data = r.message[0];
+                    let available_budget = budget_data.available_budget;
+
+                    if (requested_amount > available_budget) {
+                        let budgetFor = cost_center ? __('Cost Center: ') + cost_center : __('Project: ') + project;
+
+                        resolve({
+                            budget_exceeded: true,
+                            message: __('Budget exceeded for expense account: ') + expense_account +
+                                   __('<br>') + budgetFor +
+                                   __('<br>Requested Amount: ') + format_currency(requested_amount) +
+                                   __('<br>Available Budget: ') + format_currency(available_budget) +
+                                   __('<br>Shortage: ') + format_currency(requested_amount - available_budget)
+                        });
+                    } else {
+                        resolve({
+                            budget_exceeded: false,
+                            available_budget: available_budget,
+                            requested_amount: requested_amount
+                        });
+                    }
+                } else {
+                    let budgetFor = cost_center ? __('Cost Center: ') + cost_center : __('Project: ') + project;
+                    resolve({
+                        error: __('No budget data found for expense account: ') + expense_account +
+                               __(' with ') + budgetFor
+                    });
+                }
+            },
+            error: function(err) {
+                resolve({
+                    error: __('Error checking budget for expense account: ') + expense_account
+                });
+            }
+        });
+    });
+}
+
+function checkMonthlyDistributionBudget(expense_account, cost_center, project, requested_amount) {
+    return new Promise((resolve) => {
+        frappe.call({
+            method: 'wcfcb_zm.api.material_request.check_monthly_budget_simple',
+            args: {
+                'expense_account': expense_account,
+                'cost_center': cost_center,
+                'project': project,
+                'requested_amount': requested_amount
+            },
+            callback: function(r) {
+                if (r.exc) {
+                    // Monthly budget check is non-blocking, so just resolve with no warning
+                    resolve({
+                        monthly_exceeded: false
+                    });
+                    return;
+                }
+
+                if (r.message) {
+                    resolve({
+                        monthly_exceeded: r.message.monthly_exceeded || false,
+                        message: r.message.message || null,
+                        available_monthly_budget: r.message.available_monthly_budget || 0,
+                        monthly_budget_amount: r.message.monthly_budget_amount || 0
+                    });
+                } else {
+                    resolve({
+                        monthly_exceeded: false
+                    });
+                }
+            },
+            error: function(err) {
+                // Monthly budget check is non-blocking, so just resolve with no warning
+                resolve({
+                    monthly_exceeded: false
+                });
+            }
+        });
+    });
+}
+
+function checkItemBudget(frm, cdt, cdn) {
+    let item = frappe.get_doc(cdt, cdn);
+
+    if (!item.expense_account) {
+        frappe.show_alert({
+            message: __('Row {0}: Expense account is required for budget validation', [item.idx]),
+            indicator: 'red'
+        });
+        return;
+    }
+
+    if (item.cost_center && item.project) {
+        frappe.show_alert({
+            message: __('Row {0}: Please set either Cost Center OR Project, not both', [item.idx]),
+            indicator: 'orange'
+        });
+        return;
+    }
+
+    if (!item.cost_center && !item.project) {
+        frappe.show_alert({
+            message: __('Row {0}: Please set either Cost Center or Project for budget validation', [item.idx]),
+            indicator: 'orange'
+        });
+        return;
+    }
+
+    // Run both budget checks in parallel
+    Promise.all([
+        // Main budget check
+        new Promise((resolve) => {
+            frappe.call({
+                method: 'wcfcb_zm.api.material_request.check_budget',
+                args: {
+                    'expense_account': item.expense_account,
+                    'cost_center': item.cost_center,
+                    'project': item.project
+                },
+                callback: function(r) {
+                    if (r.exc) {
+                        resolve({ error: true, message: __('Error checking budget') });
+                    } else if (r.message && r.message.length > 0) {
+                        resolve({ error: false, data: r.message });
+                    } else {
+                        resolve({ error: true, message: __('No budget data found for expense account ') + item.expense_account });
+                    }
+                },
+                error: function(err) {
+                    resolve({ error: true, message: __('Error checking budget') });
+                }
+            });
+        }),
+        // Monthly budget check
+        new Promise((resolve) => {
+            frappe.call({
+                method: 'wcfcb_zm.api.material_request.check_monthly_budget_simple',
+                args: {
+                    'expense_account': item.expense_account,
+                    'cost_center': item.cost_center,
+                    'project': item.project,
+                    'requested_amount': item.amount || 0
+                },
+                callback: function(r) {
+                    if (r.exc || !r.message) {
+                        resolve(null); // Monthly budget check is optional
+                    } else {
+                        // Debug: log what we're getting from monthly budget check
+                        console.log('Monthly budget result:', r.message);
+                        resolve(r.message);
+                    }
+                },
+                error: function(err) {
+                    console.log('Monthly budget check error:', err);
+                    resolve(null); // Monthly budget check is optional
+                }
+            });
+        })
+    ]).then(results => {
+        const [mainBudgetResult, monthlyBudgetResult] = results;
+
+        if (mainBudgetResult.error) {
+            frappe.show_alert({
+                message: mainBudgetResult.message,
+                indicator: 'red'
+            });
+            return;
+        }
+
+        // Show budget details with both main and monthly budget information
+        showBudgetDetails(item, mainBudgetResult.data, monthlyBudgetResult);
+    }).catch(error => {
+        frappe.show_alert({
+            message: __('Error checking budget'),
+            indicator: 'red'
+        });
+    });
+}
+
+function showBudgetDetails(item, budget_data, monthly_budget_result = null) {
+    const budgetEntry = budget_data[0];
+    const requestedAmount = item.amount || 0;
+    const isOverBudget = (budgetEntry.available_budget < 0) ||
+                        (requestedAmount > budgetEntry.available_budget);
+
+    const isLinked = item.purchase_order || (item.material_request && item.material_request.length > 0);
+
+    // Check for monthly budget warning
+    const hasMonthlyWarning = monthly_budget_result && monthly_budget_result.monthly_exceeded;
+
+    // Determine alert message and indicator (structured, multi-line toast)
+    let alertMessage, alertIndicator;
+    const contextName = item.cost_center ? (item.cost_center_name || item.cost_center) : (item.project_name || item.project);
+
+    if (isLinked) {
+        alertMessage = `<div><strong>${__('Item is linked and excluded from budget')}</strong></div>`;
+        alertIndicator = 'orange';
+    } else if (isOverBudget) {
+        alertMessage = `<div>
+            <div><strong>${__('Budget exceeded for')} ${item.expense_account} – ${contextName}</strong></div>
+            <div><span class="text-muted">${__('Requested')}:</span> <span style="font-weight:600;">${format_currency(requestedAmount)}</span></div>
+            <div><span class="text-muted">${__('Available')}:</span> <span style="font-weight:600;${budgetEntry.available_budget < 0 ? 'color:#dc3545;' : ''}">${format_currency(budgetEntry.available_budget)}</span></div>
+        </div>`;
+        alertIndicator = 'red';
+    } else if (hasMonthlyWarning) {
+        const monAvail = monthly_budget_result.available_monthly_budget;
+        alertMessage = `<div>
+            <div><strong>${__('Monthly budget warning for')} ${item.expense_account}</strong></div>
+            <div><span class="text-muted">${__('Requested')}:</span> <span style="font-weight:600;">${format_currency(requestedAmount)}</span></div>
+            <div><span class="text-muted">${__('Monthly Available')}:</span> <span style="font-weight:600;${monAvail < 0 ? 'color:#dc3545;' : ''}">${format_currency(monAvail)}</span></div>
+        </div>`;
+        alertIndicator = 'orange';
+    } else {
+        alertMessage = `<div>
+            <div><strong>${__('Within budget for')} ${item.expense_account}</strong></div>
+            <div><span class="text-muted">${__('Requested')}:</span> <span style="font-weight:600;">${format_currency(requestedAmount)}</span></div>
+            <div><span class="text-muted">${__('Available')}:</span> <span style="font-weight:600;">${format_currency(budgetEntry.available_budget)}</span></div>
+        </div>`;
+        alertIndicator = 'green';
+    }
+
+    frappe.show_alert({
+        message: alertMessage,
+        indicator: alertIndicator
+    });
+
+    let budgetFor = item.cost_center ?
+        __('Cost Center: ') + (item.cost_center_name || item.cost_center) :
+        __('Project: ') + (item.project_name || item.project);
+
+    // Only show monthly budget info if it's actually configured (non-zero budget amount)
+    const hasMonthlyBudget = monthly_budget_result &&
+                            monthly_budget_result.monthly_budget_amount &&
+                            monthly_budget_result.monthly_budget_amount > 0;
+
+    const monthName = (monthly_budget_result && monthly_budget_result.current_month) ? monthly_budget_result.current_month : '';
+    const monthText = (monthName && monthName !== 'undefined' && monthName !== 'null') ? ' (' + monthName + ')' : '';
+
+    // Create modern budget details dialog using Frappe's built-in UI
+    showModernBudgetDialog(item, budgetEntry, monthly_budget_result, {
+        budgetFor,
+        requestedAmount,
+        isOverBudget,
+        isLinked,
+        hasMonthlyWarning,
+        hasMonthlyBudget,
+        monthText,
+        budget_data
+    });
+}
+
+function showModernBudgetDialog(item, budgetEntry, monthly_budget_result, options) {
+    const {
+        budgetFor,
+        requestedAmount,
+        isOverBudget,
+        isLinked,
+        hasMonthlyWarning,
+        hasMonthlyBudget,
+        monthText,
+        budget_data
+    } = options;
+
+    // Create a modern dialog using Frappe's Dialog class
+    const dialog = new frappe.ui.Dialog({
+        title: __('Budget Details'),
+        size: 'large',
+        fields: [
+            {
+                fieldtype: 'HTML',
+                fieldname: 'budget_content',
+                options: generateBudgetHTML(item, budgetEntry, monthly_budget_result, options)
+            }
+        ],
+        primary_action_label: __('Close'),
+        primary_action: function() {
+            dialog.hide();
+        }
+    });
+
+    dialog.show();
+}
+
+function generateBudgetHTML(item, budgetEntry, monthly_budget_result, options) {
+    const {
+        budgetFor,
+        requestedAmount,
+        isOverBudget,
+        isLinked,
+        hasMonthlyWarning,
+        hasMonthlyBudget,
+        monthText,
+        budget_data
+    } = options;
+
+    const statusBadgeClass = isLinked ? 'badge badge-warning badge-pill' : (isOverBudget ? 'badge badge-danger badge-pill' : 'badge badge-success badge-pill');
+    const statusBadgeText = isLinked ? __('Excluded (Linked)') : (isOverBudget ? __('Over Budget') : __('Within Budget'));
+
+    const monthlyBlocks = hasMonthlyBudget ? `
+        <div class="col-md-6">
+            <div class="card mb-3 shadow-sm">
+                <div class="card-body py-3">
+                    <div class="text-muted small">${__('Monthly Budget')}${monthText}</div>
+                    <div class="h4 mb-0">${format_currency(monthly_budget_result.monthly_budget_amount)}</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card mb-3 shadow-sm ${monthly_budget_result.available_monthly_budget < 0 ? 'border-danger' : 'border-warning'}">
+                <div class="card-body py-3">
+                    <div class="text-muted small">${__('Available This Month')}</div>
+                    <div class="h4 mb-0 ${monthly_budget_result.available_monthly_budget < 0 ? 'text-danger font-weight-bold' : 'text-primary font-weight-bold'}">${format_currency(monthly_budget_result.available_monthly_budget)}</div>
+                </div>
+            </div>
+        </div>` : `
+        <div class="col-md-12">
+            <div class="alert alert-info py-2 mb-3">
+                <strong>${__('Note:')}</strong> ${__('No monthly distribution configured for this budget. Monthly budget details are not available.')}
+            </div>
+        </div>`;
+
+    const rows = budget_data.map(b => {
+        const neg = b.available_budget < 0;
+        return `
+            <tr${neg ? ' class="table-danger"' : ''}>
+                <td><strong>${b.account_name}</strong></td>
+                <td class="text-right">${format_currency(b.budget_amount)}</td>
+                <td class="text-right">${format_currency(b.actual_expenses)}</td>
+                <td class="text-right">${format_currency(b.material_request_committed + b.purchase_order_committed)}</td>
+                <td class="text-right ${neg ? 'text-danger font-weight-bold' : 'text-success font-weight-bold'}">${format_currency(b.available_budget)}</td>
+            </tr>`;
+    }).join('');
+
+    return `
+        <div class="container-fluid p-0">
+            <div class="d-flex justify-content-between align-items-start mb-3">
+                <div>
+                    <div class="h6 mb-1">${__('Budget Details for')} ${item.expense_account}</div>
+                    <div class="text-muted small">${budgetFor}</div>
+                </div>
+                <span class="${statusBadgeClass}">${statusBadgeText}</span>
+            </div>
+
+            ${hasMonthlyWarning ? `<div class="alert alert-warning py-2 mb-3">${__('Monthly budget limit will be exceeded with this request')}</div>` : ''}
+            ${isLinked ? `<div class="alert alert-warning py-2 mb-3">${__('This item is linked and excluded from budget')}</div>` : ''}
+
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="card mb-3 shadow-sm">
+                        <div class="card-body py-3">
+                            <div class="text-muted small">${__('Requested Amount')}</div>
+                            <div class="h4 mb-0 ${isOverBudget && !isLinked ? 'text-danger' : ''}">${format_currency(requestedAmount)}</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="card mb-3 shadow-sm ${budgetEntry.available_budget < 0 ? 'border-danger' : 'border-success'}">
+                        <div class="card-body py-3">
+                            <div class="text-muted small">${__('Available Budget')}</div>
+                            <div class="h4 mb-0 ${budgetEntry.available_budget < 0 ? 'text-danger font-weight-bold' : 'text-success font-weight-bold'}">${format_currency(budgetEntry.available_budget)}</div>
+                        </div>
+                    </div>
+                </div>
+                ${monthlyBlocks}
+            </div>
+
+            <div class="card shadow-sm">
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-sm mb-0">
+                            <thead class="thead-light">
+                                <tr>
+                                    <th>${__('Account')}</th>
+                                    <th class="text-right">${__('Budget')}</th>
+                                    <th class="text-right">${__('Actual')}</th>
+                                    <th class="text-right">${__('Committed')}</th>
+                                    <th class="text-right">${__('Available')}</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${rows}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+}
+
+function checkAllItemsBudget(frm) {
+    return new Promise((resolve) => {
+        if (!frm.doc.items || frm.doc.items.length === 0) {
+            frappe.msgprint(__("Please add items first"));
+            resolve();
+            return;
+        }
+
+        frm.doc.items.forEach(function(item) {
+            if (item.expense_account) {
+                checkItemBudget(frm, item.doctype, item.name);
+            }
+        });
+        resolve();
+    });
+}
+
+function format_currency(value) {
+    return frappe.format(value, {
+        fieldtype: "Currency",
+        options: frappe.defaults.get_default("currency")
+    });
+}
